@@ -33,6 +33,38 @@ class OperationRepository(BaseRepository):
             ) last_event ON true
     """
 
+    def list_for_site_config(self, site_id: str, tenant_id: str) -> list[dict[str, Any]]:
+        """Regras (operações) das câmeras de um site — payload do config/poll do edge.
+
+        É o que a tela de Cenário grava: `config` carrega zona (`zone_points`/
+        `line_points`/`roi_points`), escopo de classes (`watch_classes`/
+        `target_class`) e o modo de aviso (`persistence_s`, `direction`,
+        `iou_threshold`). Sem isto a promessa da tela ("SALVAR PROPAGA AO BOX
+        DO SITE EM ~60 S") não se cumpre — o cenário nunca saía da nuvem.
+
+        Junta por `cameras.site_id` e NÃO por `operations.site_id`: a coluna
+        existe na tabela, mas está NULL em 100% das linhas (medido no DEV em
+        2026-09-07: 17 de 17) — filtrar por ela devolveria lista vazia sempre,
+        que é exatamente o modo de falha silenciosa que esta tarefa veio
+        consertar.
+
+        Inclui operação `inactive` com o próprio `status`: quem decide ignorar
+        é o consumidor. Omitir a linha tornaria "pausada" indistinguível de
+        "excluída" para o box — mesmo motivo pelo qual as câmeras arquivadas
+        viajam com `is_active` em vez de sumirem do payload.
+        """
+        return self._execute(
+            """
+            SELECT o.id, o.camera_id, o.module_id, o.type_id, o.template_id,
+                   o.name, o.config, o.status, o.version
+            FROM operations o
+            JOIN cameras c ON c.id = o.camera_id
+            WHERE c.site_id = %s AND o.tenant_id = %s AND c.tenant_id = %s
+            ORDER BY o.camera_id, o.id ASC
+            """,
+            (str(site_id), str(tenant_id), str(tenant_id)),
+        )
+
     def list_by_camera(self, tenant_id: str, camera_id: str) -> list[dict[str, Any]]:
         """Lista operações de uma câmera para o tenant informado."""
         return self._execute(

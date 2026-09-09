@@ -13,6 +13,7 @@ Estratégia: repositórios e storage são mockados — testes unitários de
 camada de rota/task, sem banco real (padrão de tests/unit/api/*).
 """
 import datetime
+import hashlib
 import sys
 import uuid
 from unittest.mock import MagicMock
@@ -588,3 +589,85 @@ class TestValidateOnnxTask:
             1, 3, 640, 640,
         ]
         assert model_validation._dummy_input_shape(None) == [1, 3, 640, 640]
+
+
+# ---------------------------------------------------------------------------
+# Task record_onnx_digest — a ÚNICA fonte de `metrics.onnx_sha256`, que é o
+# que destrava o manifesto de modelo no config/poll do edge.
+# ---------------------------------------------------------------------------
+
+class TestRecordOnnxDigestTask:
+    @pytest.fixture()
+    def task_repo(self, monkeypatch):
+        repo = MagicMock()
+        monkeypatch.setattr(model_validation, "_get_registry_repo", lambda: repo)
+        return repo
+
+    @pytest.fixture()
+    def task_storage(self, monkeypatch):
+        storage = MagicMock()
+        monkeypatch.setattr(
+            model_validation, "_get_storage", MagicMock(return_value=storage)
+        )
+        return storage
+
+    def test_grava_sha256_real_do_artefato(self, task_repo, task_storage):
+        conteudo = b"onnx-de-verdade"
+        task_repo.get_by_id.return_value = {
+            "id": MODEL_ID, "r2_onnx_key": "models/x.onnx", "metrics": {},
+            "tenant_id": "11111111-1111-1111-1111-111111111111",
+        }
+        task_storage.download_bytes.return_value = conteudo
+
+        resultado = model_validation.record_onnx_digest.apply(args=(MODEL_ID,)).get()
+
+        esperado = hashlib.sha256(conteudo).hexdigest()
+        assert resultado["status"] == "completed"
+        assert resultado["sha256"] == esperado
+        task_repo.merge_metrics.assert_called_once_with(
+            MODEL_ID, {"onnx_sha256": esperado, "onnx_bytes": len(conteudo)}
+        )
+
+    def test_idempotente_nao_rebaixa_artefato(self, task_repo, task_storage):
+        task_repo.get_by_id.return_value = {
+            "id": MODEL_ID, "r2_onnx_key": "models/x.onnx",
+            "metrics": {"onnx_sha256": "f" * 64},
+        }
+
+        resultado = model_validation.record_onnx_digest.apply(args=(MODEL_ID,)).get()
+
+        assert resultado["status"] == "skipped"
+        task_storage.download_bytes.assert_not_called()
+        task_repo.merge_metrics.assert_not_called()
+
+    def test_sem_artefato_nao_grava_digest(self, task_repo, task_storage):
+        task_repo.get_by_id.return_value = {
+            "id": MODEL_ID, "r2_onnx_key": None, "metrics": {},
+        }
+
+        resultado = model_validation.record_onnx_digest.apply(args=(MODEL_ID,)).get()
+
+        assert resultado["status"] == "failed"
+        assert resultado["reason"] == "missing_onnx_key"
+        task_repo.merge_metrics.assert_not_called()
+
+    def test_falha_de_download_nao_grava_digest_falso(self, task_repo, task_storage):
+        """Nunca gravar um digest que não veio dos bytes — seria pior que nenhum."""
+        task_repo.get_by_id.return_value = {
+            "id": MODEL_ID, "r2_onnx_key": "models/x.onnx", "metrics": {},
+        }
+        task_storage.download_bytes.side_effect = RuntimeError("R2 fora do ar")
+
+        resultado = model_validation.record_onnx_digest.apply(args=(MODEL_ID,)).get()
+
+        assert resultado["status"] == "failed"
+        task_repo.merge_metrics.assert_not_called()
+
+    def test_task_registrada_no_include_do_celery(self):
+        """Sem estar no `include`, a task existe no código e não existe no worker
+        — foi o caso de `validate_onnx` até esta rodada."""
+        from app.infrastructure.queue.celery_app import celery
+        assert (
+            "app.infrastructure.queue.tasks.model_validation"
+            in celery.conf.include
+        )

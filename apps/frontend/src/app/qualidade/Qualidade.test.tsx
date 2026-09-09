@@ -12,6 +12,10 @@ const auth = vi.hoisted(() => ({
   isSuperAdmin: false,
 }))
 vi.mock('../../hooks/useAuth', () => ({ useAuth: () => auth }))
+vi.mock('../../services/tenantContext', () => ({
+  isInTenantContext: () => false,
+  getSessionTokenExpMs: () => null,
+}))
 
 const get = vi.fn()
 const patch = vi.fn()

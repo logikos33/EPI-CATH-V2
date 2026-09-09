@@ -114,8 +114,23 @@ export const rotaNova = (caminho: string) => PREFIXO_NOVO + caminho
  * import de serviço: o logo do Shell (`Marca`, F5-LEVE) e a raiz do prefixo
  * (`RaizRotasNovas.tsx`) chamam esta MESMA função — duplicar a regra nos
  * dois lugares é como ela divergiria um dia sem ninguém perceber.
+ *
+ * `emContextoDeTenant` fecha um beco: com um tenant assumido, o superadmin
+ * está VENDO COMO aquele cliente, e mandar a home dele para `/admin` prendia
+ * a pessoa na área de plataforma — o logo, o "Voltar" e a raiz do prefixo
+ * devolviam todos para o mesmo lugar de onde ela queria sair, sem nenhum
+ * caminho para o produto do cliente. Assumido o contexto, a home é a do
+ * CLIENTE. Sair do contexto (banner) devolve a home de plataforma.
+ *
+ * O parâmetro é obrigatório de propósito: quem chama tem de decidir. Com um
+ * default, um ponto de navegação esquecido continuaria no beco em silêncio —
+ * e é exatamente assim que este bug sobreviveu até um operador reclamar.
  */
-export function rotaHomeDoUsuario(isSuperAdmin: boolean): string {
+export function rotaHomeDoUsuario(
+  isSuperAdmin: boolean,
+  emContextoDeTenant: boolean,
+): string {
+  if (emContextoDeTenant) return rotaNova('/modules')
   return rotaNova(isSuperAdmin ? '/admin' : '/modules')
 }
 

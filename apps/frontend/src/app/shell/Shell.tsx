@@ -31,7 +31,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-do
 import { ErrorBoundary } from '../../components/shared/ErrorBoundary'
 import { NotificationBell } from '../../components/ui/NotificationBell/NotificationBell'
 import { useAuth } from '../../hooks/useAuth'
-import { getSessionTokenExpMs } from '../../services/tenantContext'
+import { getSessionTokenExpMs, isInTenantContext } from '../../services/tenantContext'
 import { LogikosLoader } from './LogikosLoader'
 import { PaletaComandos, type GrupoPaleta } from './PaletaComandos'
 import { SeletorTenant } from './SeletorTenant'
@@ -155,7 +155,7 @@ export function Shell({ carregando }: ShellProps) {
             <Menu size={18} strokeWidth={1.7} />
           </button>
         )}
-        <Marca para={rotaHomeDoUsuario(isSuperAdmin)} />
+        <Marca para={rotaHomeDoUsuario(isSuperAdmin, isInTenantContext())} />
         <span className={s.espacador} />
         <SeletorTenant />
         {/**

@@ -824,6 +824,11 @@ def create_user():
         role = data.get("role", "operator")
         tenant_id = data.get("tenant_id")
         access_expires_at = data.get("access_expires_at")
+        # Nome de gente. Sem ele o cadastro caía em `email.split("@")[0]`, e o
+        # operador via "vitorsantu8" ao validar um evento — o crachá do sistema
+        # virava o pedaço do e-mail. Continua opcional: scripts de seed e
+        # chamadas antigas seguem funcionando com o fallback.
+        nome = (data.get("name") or "").strip()
 
         if not email or not tenant_id:
             return error("email e tenant_id são obrigatórios", 400)
@@ -874,7 +879,7 @@ def create_user():
                        is_active, force_password_reset, access_expires_at)
                     VALUES (%s, %s, %s, %s, %s, %s, true, true, %s)
                     RETURNING id, email, role, tenant_id, is_active, created_at
-                """, (user_id, email, password_hash, email.split("@")[0],
+                """, (user_id, email, password_hash, nome or email.split("@")[0],
                       role, tenant_id, access_expires_at))
                 user = _clean_row(dict(cur.fetchone()))
             conn.commit()
@@ -890,7 +895,8 @@ def create_user():
 
         actor_id, actor_role = _get_actor()
         log_audit(actor_id, actor_role, tenant_id, "user", user_id,
-                  "created", new_value={"email": email, "role": role},
+                  "created", new_value={"email": email, "role": role,
+                                        "name": nome or email.split("@")[0]},
                   ip_address=_get_ip(), user_agent=_get_ua())
 
         return success({
@@ -911,7 +917,7 @@ def create_user():
 def update_user(user_id: str):
     try:
         data = request.get_json() or {}
-        allowed = {"role", "access_expires_at"}
+        allowed = {"role", "access_expires_at", "name"}
         updates = {k: v for k, v in data.items() if k in allowed}
         if not updates:
             return error("Nenhum campo válido para atualizar", 400)
@@ -919,11 +925,15 @@ def update_user(user_id: str):
         pool = _pool()
         with pool.get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT role, tenant_id FROM users WHERE id = %s", (user_id,))
+                cur.execute(
+                    "SELECT role, tenant_id, name FROM users WHERE id = %s",
+                    (user_id,),
+                )
                 row = cur.fetchone()
                 if not row:
                     return error("Usuário não encontrado", 404)
                 old_role, tenant_id = row["role"], row["tenant_id"]
+                old_name = row["name"]
 
                 if "role" in updates:
                     cur.execute(
@@ -935,12 +945,21 @@ def update_user(user_id: str):
                         "UPDATE users SET access_expires_at = %s WHERE id = %s",
                         (updates["access_expires_at"], user_id),
                     )
+                if "name" in updates:
+                    # Nome vazio volta ao fallback do e-mail em vez de gravar
+                    # string vazia — a tela nunca deve mostrar pessoa sem crachá.
+                    novo_nome = (updates["name"] or "").strip()
+                    cur.execute(
+                        "UPDATE users SET name = %s WHERE id = %s",
+                        (novo_nome or None, user_id),
+                    )
             conn.commit()
 
         actor_id, actor_role = _get_actor()
         log_audit(actor_id, actor_role, str(tenant_id) if tenant_id else None,
                   "user", user_id, "updated",
-                  old_value={"role": old_role}, new_value=updates,
+                  old_value={"role": old_role, "name": old_name},
+                  new_value=updates,
                   ip_address=_get_ip(), user_agent=_get_ua())
 
         return success({"updated": True})
