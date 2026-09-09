@@ -395,3 +395,132 @@ export const linhaRajadaToggle = style({
 
 /** Linhas-repetição reveladas — mesma célula, tom apagado (não é evento novo). */
 export const linhaRepeticao = style({ opacity: 0.72 })
+
+// ── Gaveta de evidência (julgar sem sair da lista) ───────────────────────────
+//
+// Sobrepõe a lista em vez de dividir a largura com ela: a tabela tem 8 colunas
+// e um painel LATERAL a empurraria para a rolagem horizontal — que é onde a
+// posição na lista se perde de verdade. O fundo escurece mas a lista continua
+// atrás, no mesmo lugar e na mesma rolagem, e é para lá que o Esc volta.
+
+export const painelFundo = style({
+  position: 'fixed',
+  inset: 0,
+  // `color-mix` e não `rgba()`: o preto é token de white-label (ver topo).
+  background: `color-mix(in srgb, ${lk.cor.preto} 72%, transparent)`,
+  zIndex: 900,
+  display: 'flex',
+  justifyContent: 'flex-end',
+})
+
+export const gaveta = style({
+  width: 'min(760px, 100vw)',
+  height: '100%',
+  boxSizing: 'border-box',
+  display: 'flex',
+  flexDirection: 'column',
+  background: lk.cor.grafite,
+  borderLeft: `1px solid ${lk.cor.borda}`,
+  fontFamily: lk.fonte.ui,
+  color: lk.cor.brancoSinal,
+  ':focus-visible': { outline: 'none' },
+})
+
+export const gavetaTopo = style({
+  display: 'flex',
+  alignItems: 'center',
+  gap: lk.espaco.x1,
+  padding: `12px ${lk.espaco.x2}`,
+  borderBottom: `1px solid ${lk.cor.borda}`,
+  flexShrink: 0,
+})
+
+export const gavetaTitulo = style({
+  fontFamily: lk.fonte.titulo,
+  fontWeight: 700,
+  fontSize: '16px',
+})
+
+export const gavetaFechar = style({
+  width: '32px',
+  height: '32px',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  background: 'transparent',
+  border: `1px solid ${lk.cor.borda}`,
+  borderRadius: lk.raio.s,
+  color: lk.cor.cinzaNevoa,
+  cursor: 'pointer',
+  ':hover': { color: lk.cor.brancoSinal, borderColor: lk.cor.cianoVisao },
+  '@media': { [TELA_ESTREITA]: { width: '44px', height: '44px' } },
+})
+
+export const gavetaCorpo = style({
+  flex: 1,
+  minHeight: 0,
+  overflowY: 'auto',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '12px',
+  padding: lk.espaco.x2,
+})
+
+/** Ficha do evento: rótulo à esquerda, dado à direita. */
+export const gavetaDados = style({
+  display: 'grid',
+  gridTemplateColumns: 'auto 1fr',
+  gap: '6px 14px',
+  alignItems: 'baseline',
+  fontSize: '13px',
+})
+
+export const gavetaRotulo = style({
+  fontFamily: lk.fonte.mono,
+  fontSize: '10px',
+  letterSpacing: OVERLINE_TRACKING,
+  textTransform: 'uppercase',
+  color: lk.cor.cinzaNevoa,
+})
+
+export const gavetaVeredito = style({
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'flex-start',
+  gap: '8px',
+  padding: lk.espaco.x2,
+  border: `1px solid ${lk.cor.borda}`,
+  borderRadius: lk.raio.m,
+})
+
+export const gavetaAjuda = style({ fontSize: '12.5px', color: lk.cor.cinzaNevoa, lineHeight: 1.5 })
+
+export const gavetaErro = style({ fontSize: '12px', color: lk.estado.nc })
+
+export const gavetaBotoes = style({
+  display: 'flex',
+  gap: lk.espaco.x1,
+  flexWrap: 'wrap',
+  '@media': { [TELA_ESTREITA]: { flexDirection: 'column', alignItems: 'stretch', width: '100%' } },
+})
+
+export const gavetaRodape = style({
+  display: 'flex',
+  alignItems: 'center',
+  gap: lk.espaco.x1,
+  padding: `10px ${lk.espaco.x2}`,
+  borderTop: `1px solid ${lk.cor.borda}`,
+  flexShrink: 0,
+})
+
+/** Campo que falta preencher — borda de erro, sem trocar a cor do texto. */
+export const filtroErro = style({ borderColor: lk.estado.nc })
+
+/** Linha cujo evento está aberto na gaveta: é ELA que a pessoa não pode
+ *  perder de vista ao decidir e avançar. Paleta neutra de propósito — não é
+ *  polaridade, não é veredito, não é status: é só "onde eu estou". */
+export const linhaAberta = style({
+  outline: `2px solid ${lk.cor.bordaForte}`,
+  outlineOffset: '-2px',
+  background: `color-mix(in srgb, ${lk.cor.cinzaNevoa} 6%, transparent)`,
+})

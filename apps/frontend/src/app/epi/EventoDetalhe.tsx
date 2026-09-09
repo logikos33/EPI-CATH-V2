@@ -31,10 +31,12 @@
  *   nada além de "erramos". Mesmo `aria-label`, mesmo `maxLength`, mesma
  *   ida ao backend.
  *
- * · **Lupa da evidência** (item 3): `proximoEstado()` de
- *   `pages/epi/lupaEvidencia.ts` — módulo PURO e testado, reusado inteiro.
- *   ⚠️ Ele mora em `pages/epi/` mas NÃO é do front antigo: marcar como INFRA
- *   no `MANIFESTO-FRONT-ANTIGO.md`, senão some junto com a página velha.
+ * · **Lupa da evidência** (item 3): a matemática é `pages/epi/lupaEvidencia.ts`
+ *   — módulo PURO e testado, reusado inteiro. A cola com o DOM (roda
+ *   não-passiva, pinça, teclas) é `useLupa()`, vizinho deste arquivo, e a
+ *   gaveta de evidência da LISTA chama exatamente o mesmo hook.
+ *   ⚠️ O módulo puro mora em `pages/epi/` mas NÃO é do front antigo: marcar
+ *   como INFRA no `MANIFESTO-FRONT-ANTIGO.md`, senão some com a página velha.
  *
  * ─────────────────────────────────────────────────────────────────────────
  * ADR-0065 / 0066 / 0067 — o que esta tela NÃO afirma
@@ -53,7 +55,7 @@
  * O chip diz o que está REGISTRADO, e o `title` diz que a autoria não vem
  * neste endpoint. Os dois gaps estão no bloco PARA O BACKEND, no fim.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowLeft, Check, Clock, Cpu, ImageOff, Maximize2, Minus, Pencil, Plus, SearchX, X,
 } from 'lucide-react'
@@ -65,15 +67,13 @@ import { classificarLatencia } from '../../components/shared/ProcedenciaBadge'
 import { ORIGEM_HUMANA, procedenciaDeclarada } from '../../components/shared/ProcedenciaEvento'
 import { useAuth } from '../../hooks/useAuth'
 import { confiancaBruta, confiancaInternaOuCliente } from '../../services/confidenceDisplay'
-import {
-  ESCALA_MAX, ESCALA_MIN, LUPA_INICIAL, distanciaEntre, proximoEstado,
-  type EventoLupa, type Palco,
-} from '../../pages/epi/lupaEvidencia'
+import { ESCALA_MAX, ESCALA_MIN } from '../../pages/epi/lupaEvidencia'
 import { ApiError, api } from '../../services/api'
 import { labelForClass } from '../../utils/labels'
 import { rotaNova } from '../RotasNovas'
 import { LogikosLoader } from '../shell/LogikosLoader'
 import * as s from './EventoDetalhe.css'
+import { useLupa } from './useLupa'
 
 /**
  * Rota da lista NO FRONT NOVO (de-para do DELTA: `/epi/alerts` → `/epi/eventos`).
@@ -282,59 +282,29 @@ export function EventoDetalhe() {
   // não julga. Zoom/pan vivem numa ÚNICA camada transformada que envolve a
   // <img> E as caixas — por isso a caixa escala junto, ancorada nos mesmos
   // pixels. Tirar as caixas de dentro dessa camada dessincroniza em silêncio.
-  const palcoRef = useRef<HTMLDivElement>(null)
-  const [lupa, setLupa] = useState(LUPA_INICIAL)
-  // O listener de wheel é registrado uma vez (precisa ser não-passivo); o ref
-  // dá a ele o estado atual sem re-registrar.
-  const lupaRef = useRef(lupa)
-  lupaRef.current = lupa
-  const ponteiros = useRef(new Map<number, { x: number; y: number }>())
-  const distPinca = useRef(0)
+  //
+  // A cola com o DOM (roda não-passiva, pinça, teclas) mora em `useLupa` desde
+  // que o painel de julgamento da LISTA passou a precisar da mesma lupa: dois
+  // zooms copiados divergiriam no primeiro ajuste. Aqui só sobrou o que é
+  // desta tela — o modo de CORREÇÃO de caixa, que sequestra o mesmo ponteiro.
+  const {
+    lupa, refPalco, aoDuploClique, ampliar, reenquadrar,
+    aoDescerPonteiro: lupaDesce,
+    aoMoverPonteiro: lupaMove,
+    aoSoltarPonteiro: lupaSolta,
+    aoTeclar: lupaTecla,
+  } = useLupa()
 
   // Evento novo = enquadramento novo — e a correção de um evento não deve
   // sobreviver para o próximo.
   useEffect(() => {
-    setLupa(LUPA_INICIAL)
+    reenquadrar()
     setSelecionada(null)
     setRascunho(null)
     setErroCaixa(null)
-  }, [id])
-
-  const medir = useCallback((): { rect: DOMRect; palco: Palco } | null => {
-    const el = palcoRef.current
-    if (!el) return null
-    const rect = el.getBoundingClientRect()
-    return { rect, palco: { largura: rect.width, altura: rect.height } }
-  }, [])
-
-  const despachar = useCallback((ev: EventoLupa, palco: Palco) => {
-    setLupa((prev) => proximoEstado(prev, ev, palco))
-  }, [])
-
-  /** Âncora relativa ao CENTRO do palco — `transformOrigin: center` assume isso. */
-  const ancorar = (rect: DOMRect, clientX: number, clientY: number) => ({
-    ancoraX: clientX - (rect.left + rect.width / 2),
-    ancoraY: clientY - (rect.top + rect.height / 2),
-  })
+  }, [id, reenquadrar])
 
   const evidencia = evento?.evidence_url ?? null
-  useEffect(() => {
-    const el = palcoRef.current
-    if (!el) return
-    const onWheel = (ev: WheelEvent) => {
-      // Já no piso e afastando: NÃO sequestra a roda — a página rola normal.
-      if (lupaRef.current.escala === ESCALA_MIN && ev.deltaY > 0) return
-      ev.preventDefault()   // exige passive:false; o onWheel do React é passivo.
-      const m = medir()
-      if (!m) return
-      despachar(
-        { tipo: 'zoom', fator: ev.deltaY < 0 ? 1.15 : 1 / 1.15, ...ancorar(m.rect, ev.clientX, ev.clientY) },
-        m.palco,
-      )
-    }
-    el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
-  }, [despachar, medir, evidencia])
 
   /**
    * Ponto do cursor → coordenadas NORMALIZADAS (0–1) do frame, para a
@@ -359,9 +329,7 @@ export function EventoDetalhe() {
       if (pos) interacaoCaixa.current = { modo: 'desenhar', x0: pos.x, y0: pos.y }
       return
     }
-    ponteiros.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
-    if (ponteiros.current.size === 2) distPinca.current = distanciaEntre([...ponteiros.current.values()])
-    e.currentTarget.setPointerCapture(e.pointerId)
+    lupaDesce(e)
   }
 
   const aoMoverPonteiro = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -385,61 +353,18 @@ export function EventoDetalhe() {
       }
       return
     }
-    const anterior = ponteiros.current.get(e.pointerId)
-    if (!anterior) return
-    ponteiros.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
-    const m = medir()
-    if (!m) return
-    const pontos = [...ponteiros.current.values()]
-    if (pontos.length >= 2) {
-      // Pinça: fator = variação da distância, âncora no ponto médio.
-      const nova = distanciaEntre(pontos)
-      if (distPinca.current > 0 && nova > 0) {
-        const meio = { x: (pontos[0].x + pontos[1].x) / 2, y: (pontos[0].y + pontos[1].y) / 2 }
-        despachar({ tipo: 'zoom', fator: nova / distPinca.current, ...ancorar(m.rect, meio.x, meio.y) }, m.palco)
-      }
-      distPinca.current = nova
-      return
-    }
-    // Em escala 1 o limite de pan é 0: arrastar já é inócuo, sem guarda extra.
-    despachar({ tipo: 'arrastar', dx: e.clientX - anterior.x, dy: e.clientY - anterior.y }, m.palco)
+    lupaMove(e)
   }
 
   const aoSoltarPonteiro = (e: React.PointerEvent<HTMLDivElement>) => {
     if (selecionada !== null) { interacaoCaixa.current = null; return }
-    ponteiros.current.delete(e.pointerId)
-    distPinca.current = 0
-  }
-
-  const aoDuploClique = (e: React.MouseEvent<HTMLDivElement>) => {
-    const m = medir()
-    if (!m) return
-    if (lupaRef.current.escala >= ESCALA_MAX) { despachar({ tipo: 'reset' }, m.palco); return }
-    despachar({ tipo: 'zoom', fator: 2, ...ancorar(m.rect, e.clientX, e.clientY) }, m.palco)
+    lupaSolta(e)
   }
 
   /** Teclado: zoom só na roda é inutilizável sem mouse. Não é enfeite. */
-  const PASSO_TECLA = 40
   const aoTeclar = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (selecionada !== null && e.key === 'Escape') { cancelarCorrecao(); e.preventDefault(); return }
-    const m = medir()
-    if (!m) return
-    const noCentro = { ancoraX: 0, ancoraY: 0 }
-    const setas: Record<string, [number, number]> = {
-      ArrowLeft: [PASSO_TECLA, 0], ArrowRight: [-PASSO_TECLA, 0],
-      ArrowUp: [0, PASSO_TECLA], ArrowDown: [0, -PASSO_TECLA],
-    }
-    if (e.key === '+' || e.key === '=') despachar({ tipo: 'zoom', fator: 1.5, ...noCentro }, m.palco)
-    else if (e.key === '-' || e.key === '_') despachar({ tipo: 'zoom', fator: 1 / 1.5, ...noCentro }, m.palco)
-    else if (e.key === '0') despachar({ tipo: 'reset' }, m.palco)
-    else if (setas[e.key]) { const [dx, dy] = setas[e.key]; despachar({ tipo: 'arrastar', dx, dy }, m.palco) }
-    else return
-    e.preventDefault()
-  }
-
-  const zoomBotao = (fator: number) => {
-    const m = medir()
-    if (m) despachar({ tipo: 'zoom', fator, ancoraX: 0, ancoraY: 0 }, m.palco)
+    lupaTecla(e)
   }
 
   // ── veredito ──────────────────────────────────────────────────────────────
@@ -623,7 +548,7 @@ export function EventoDetalhe() {
       <div className={s.corpo}>
         <div className={s.colunaEvidencia}>
           <div
-            ref={palcoRef}
+            ref={refPalco}
             className={s.palco}
             tabIndex={0}
             role="group"
@@ -777,15 +702,15 @@ export function EventoDetalhe() {
 
           <div className={s.barraLupa}>
             <button type="button" className={s.botaoLupa} aria-label="Ampliar"
-                    onClick={() => zoomBotao(1.5)} disabled={lupa.escala >= ESCALA_MAX}>
+                    onClick={() => ampliar(1.5)} disabled={lupa.escala >= ESCALA_MAX}>
               <Plus size={15} aria-hidden />
             </button>
             <button type="button" className={s.botaoLupa} aria-label="Reduzir"
-                    onClick={() => zoomBotao(1 / 1.5)} disabled={lupa.escala <= ESCALA_MIN}>
+                    onClick={() => ampliar(1 / 1.5)} disabled={lupa.escala <= ESCALA_MIN}>
               <Minus size={15} aria-hidden />
             </button>
             <button type="button" className={s.botaoLupa} disabled={lupa.escala === ESCALA_MIN}
-                    onClick={() => { const m = medir(); if (m) despachar({ tipo: 'reset' }, m.palco) }}>
+                    onClick={reenquadrar}>
               <Maximize2 size={14} aria-hidden /> Frame inteiro
             </button>
             <span className={s.dicaLupa}>
