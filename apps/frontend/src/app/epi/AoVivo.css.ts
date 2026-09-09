@@ -721,6 +721,41 @@ export const menuCelula = style({
   cursor: 'pointer',
 })
 
+/** "Tirar do quadro" — mesmo tamanho e mesma fita do menu, ao lado dele.
+ *  Botão PRÓPRIO e não uma opção escondida dentro do <select> de trocar:
+ *  tirar a câmera do grid é uma das duas coisas que o operador vem fazer no
+ *  modo Montar, e estava enterrada como item "— remover —" de um menu
+ *  rotulado "Trocar câmera desta posição". */
+export const botaoTirar = style({
+  position: 'absolute',
+  bottom: '8px',
+  left: '42px',
+  zIndex: 4,
+  width: '28px',
+  height: '28px',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 0,
+  background: VEU,
+  border: `1px solid ${lk.cor.borda}`,
+  borderRadius: '6px',
+  color: lk.cor.cinzaNevoa,
+  cursor: 'pointer',
+  ':hover': { borderColor: lk.estado.nc, color: lk.estado.nc },
+})
+
+/** Contagem de câmeras inativas do site — link, não enfeite: some da parede
+ *  mas o operador precisa saber para onde foram. */
+export const resumoInativas = style({
+  fontFamily: lk.fonte.mono,
+  fontSize: '11.5px',
+  color: lk.cor.cinzaNevoa,
+  textDecoration: 'none',
+  borderBottom: `1px dotted ${lk.cor.borda}`,
+  ':hover': { color: lk.cor.cianoVisao },
+})
+
 export const soltePraTrocar = style({
   fontFamily: lk.fonte.mono,
   fontSize: '10px',

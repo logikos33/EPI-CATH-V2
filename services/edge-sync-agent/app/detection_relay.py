@@ -60,6 +60,18 @@ _DEFAULT_POLL_S = 1.0
 #: câmeras o pior caso seria ~58/min. Este teto não depende de quantas
 #: câmeras o site tem — estourou, o evento sobe SEM evidência.
 _DEFAULT_MAX_EVIDENCE_PER_MIN = 20
+
+#: Piso de confiança para GASTAR uma captura de evidência.
+#:
+#: O teto de 20/min é cota escassa, e sem piso ela é gasta por ordem de
+#: chegada. Medido no box da RVB em 09/09: 548 eventos em 15 min consumiram a
+#: cota inteira, e só **2 de 75 alertas** nasceram com imagem — porque a nuvem
+#: descarta abaixo de `DETECTION_CONFIDENCE_THRESHOLD` (0,50) e a cota já
+#: tinha ido embora em eventos que morreriam ali.
+#:
+#: Este piso NÃO filtra evento nenhum: tudo continua subindo. Ele só decide
+#: ONDE gastar a captura — no evento que tem chance de virar alerta.
+_DEFAULT_PISO_EVIDENCIA = 0.5
 #: Falhou a evidência → nem tenta pelos próximos 60s. Existe pelo custo de
 #: BLOQUEIO, não pela falha em si: `capture_evidence` roda DENTRO do loop
 #: que lê o pub/sub, e uma nuvem fora do ar leva o timeout inteiro (15s) em
@@ -83,6 +95,7 @@ class DetectionRelay:
         poll_s: float = _DEFAULT_POLL_S,
         evidence_capture: "Callable[[str], str | None] | None" = None,
         max_evidence_per_min: int = _DEFAULT_MAX_EVIDENCE_PER_MIN,
+        piso_evidencia: float = _DEFAULT_PISO_EVIDENCIA,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._buffer = buffer
@@ -92,6 +105,7 @@ class DetectionRelay:
         # o alerta nasce sem imagem. É o que acontecia com TODO alerta do box.
         self._evidence_capture = evidence_capture
         self._max_evidence_per_min = max_evidence_per_min
+        self._piso_evidencia = piso_evidencia
         self._clock = clock
         self._janela_inicio = clock()
         self._na_janela = 0
@@ -110,6 +124,14 @@ class DetectionRelay:
             return False
         self._na_janela += 1
         return True
+
+    @staticmethod
+    def _confianca_maxima(payload: dict) -> float:
+        """Maior confiança entre as detecções do evento. 0.0 se não houver."""
+        return max(
+            (float(d.get("confidence") or 0.0) for d in (payload.get("detections") or [])),
+            default=0.0,
+        )
 
     def _evidencia(self, camera_id: str) -> "str | None":
         """Chave R2 do frame do evento, ou None. NUNCA levanta.
@@ -162,7 +184,12 @@ class DetectionRelay:
         # Uploader promove o campo para o nível do evento, que é onde
         # /edge/events/ingest o lê. Gravada ANTES do enqueue, ela é estável
         # entre reenvios — o dedup da nuvem é sha256 do evento serializado.
-        evidencia = self._evidencia(camera_id)
+        # Só gasta a cota onde o evento tem chance de virar alerta. A nuvem
+        # descarta abaixo do próprio limiar, e imagem de evento descartado é
+        # cota jogada fora — foi o que deixou 73 de 75 alertas sem frame.
+        # ⛔ Não filtra o EVENTO: ele sobe de qualquer jeito, só sem imagem.
+        confianca = self._confianca_maxima(payload)
+        evidencia = self._evidencia(camera_id) if confianca >= self._piso_evidencia else None
         if evidencia:
             payload["evidence_r2_key"] = evidencia
         return self._buffer.enqueue(_EVENT_TYPE, camera_id, payload)
@@ -200,6 +227,7 @@ def build_detection_relay_from_env(
         return None
 
     teto = int(source.get("EDGE_MAX_EVIDENCE_PER_MIN", str(_DEFAULT_MAX_EVIDENCE_PER_MIN)))
+    piso = float(source.get("EDGE_PISO_EVIDENCIA", str(_DEFAULT_PISO_EVIDENCIA)))
     if teto <= 0:
         evidence_capture = None
     logger.info(
@@ -216,5 +244,6 @@ def build_detection_relay_from_env(
         buffer,
         _factory,
         evidence_capture=evidence_capture,
+        piso_evidencia=piso,
         max_evidence_per_min=teto,
     )

@@ -186,11 +186,8 @@ export const cameraService = {
 
   /** Arquiva a câmera (is_active=false). Reversível — ⛔ não apaga nada.
    *
-   * Não existe `delete` aqui de propósito. `DELETE /cameras/<id>` apaga em
-   * CASCATA os frames, anotações e detecções da câmera — acervo de treinamento,
-   * trabalho humano de anotação que não se recupera. Um clique numa tabela não
-   * pode poder fazer isso. A rota continua existindo como operação
-   * administrativa explícita; a UI não a alcança (issue #428).
+   * ARQUIVAR ≠ EXCLUIR (`remove` abaixo). Arquivar tira do reconhecimento e
+   * volta com `restore`; excluir tira do sistema e não volta.
    */
   async archive(id: string): Promise<Camera> {
     const res = await api.post<ApiEnvelope<{ camera: Camera }>>(`/cameras/${id}/archive`)
@@ -200,6 +197,20 @@ export const cameraService = {
   async restore(id: string): Promise<Camera> {
     const res = await api.post<ApiEnvelope<{ camera: Camera }>>(`/cameras/${id}/restore`)
     return res.data.camera
+  },
+
+  /** Exclui a câmera do sistema. IRREVERSÍVEL pela UI — não há `restore`.
+   *
+   * O que o backend faz NÃO é `DELETE FROM cameras` (isso apagaria alerta e
+   * evidência por CASCATA, e travaria por FK em câmera com frame de treino):
+   * é exclusão lógica (`cameras.deleted_at`, migration 138). A câmera some da
+   * lista, do Ao Vivo, do grid e do config do edge; alerta, evidência e frame
+   * anotado permanecem. Quem quiser a câmera de volta cadastra de novo.
+   *
+   * Quem chama TEM de pedir confirmação explícita antes (Cameras.tsx).
+   */
+  async remove(id: string): Promise<void> {
+    await api.delete<ApiEnvelope<{ deleted: boolean }>>(`/cameras/${id}`)
   },
 
   async test(id: string): Promise<TestResult> {

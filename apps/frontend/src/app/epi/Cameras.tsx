@@ -45,8 +45,20 @@
  *   cameras:test       Testar conexão
  *   cameras:control    Iniciar/Parar monitoramento
  *   cameras:configure  modo de processamento do site · salvar escopo
- * `cameras:delete` não é usado de propósito: `DELETE /cameras/<id>` apaga em
- * cascata frames e anotações — a UI arquiva (reversível), nunca apaga.
+ *   cameras:delete     Excluir câmera
+ *
+ * ── ARQUIVAR ≠ EXCLUIR (duas ações, de propósito) ───────────────────────────
+ * `Arquivar` tira a câmera do reconhecimento e VOLTA (`Desarquivar`).
+ * `Excluir` tira a câmera do sistema: ela some daqui, do Ao Vivo, do grid e
+ * do config que o edge baixa, e não há botão de volta — quem quiser de novo
+ * cadastra de novo. Antes só existia Arquivar, e a câmera arquivada seguia
+ * aparecendo no Ao Vivo para sempre; era esse o defeito.
+ *
+ * `DELETE /cameras/<id>` NÃO é mais `DELETE FROM cameras`: virou exclusão
+ * lógica (`cameras.deleted_at`, migration 138). O DELETE físico apagaria
+ * alerta e evidência por CASCATA — registro histórico, com possível valor
+ * legal — e travaria por FK em qualquer câmera com frame de treino. Então a
+ * câmera sai de todas as telas e o acervo fica.
  *
  * ── PARA O DESIGN (o que o desenho não cobre e ficou no mínimo da identidade)
  *  1. Ações do detalhe (Editar · Iniciar/Parar · Operações · Cenário ·
@@ -83,6 +95,7 @@ import {
   RefreshCw,
   Settings2,
   Square,
+  Trash2,
   TriangleAlert,
   Video,
   type LucideIcon,
@@ -872,6 +885,7 @@ export function Cameras() {
   const podeTestar = can('cameras:test')
   const podeControlar = can('cameras:control')
   const podeConfigurar = can('cameras:configure')
+  const podeExcluir = can('cameras:delete')
 
   const [aba, setAba] = useState<Aba>('cameras')
   const [carregando, setCarregando] = useState(true)
@@ -890,6 +904,17 @@ export function Cameras() {
   const [editando, setEditando] = useState<Camera | undefined>()
   const [confirmarArquivo, setConfirmarArquivo] = useState(false)
   const [arquivando, setArquivando] = useState(false)
+  const [confirmarExclusao, setConfirmarExclusao] = useState(false)
+  const [excluindo, setExcluindo] = useState(false)
+  /**
+   * Falha de AÇÃO (arquivar/excluir) ≠ falha de CARGA.
+   *
+   * Antes, arquivar que falhava caía no `erro` da carga e a tela inteira
+   * virava "Não foi possível carregar" — o que não aconteceu: a lista tinha
+   * carregado bem. Perder as 28 câmeras da tela por causa de um POST que
+   * voltou 404 é a tela afirmando uma coisa por outra.
+   */
+  const [erroAcao, setErroAcao] = useState<string | null>(null)
   const [salvandoModo, setSalvandoModo] = useState(false)
 
   const carregar = useCallback(async () => {
@@ -970,15 +995,37 @@ export function Cameras() {
   async function arquivarOuRestaurar() {
     if (!selecionada || !podeCadastrar) return
     setArquivando(true)
+    setErroAcao(null)
     try {
       if (selecionada.is_active === false) await cameraService.restore(selecionada.id)
       else await cameraService.archive(selecionada.id)
       await carregar()
     } catch (err) {
-      setErro(err instanceof Error ? err.message : 'Erro ao arquivar a câmera')
+      setErroAcao(err instanceof Error ? err.message : 'Erro ao arquivar a câmera')
     } finally {
       setArquivando(false)
       setConfirmarArquivo(false)
+    }
+  }
+
+  /** Exclui a câmera do sistema. Só é chamada pelo onConfirm do diálogo —
+   *  nunca direto de um clique, porque não há desfazer. */
+  async function excluir() {
+    if (!selecionada || !podeExcluir) return
+    setExcluindo(true)
+    setErroAcao(null)
+    try {
+      await cameraService.remove(selecionada.id)
+      // `carregar()` reescolhe a seleção: a câmera excluída não volta na
+      // lista, então `selecionadaId` cai na primeira restante (ou em null,
+      // que cai no estado vazio com o CTA de cadastrar — sem beco).
+      await carregar()
+      setConfirmarExclusao(false)
+    } catch (err) {
+      setErroAcao(err instanceof Error ? err.message : 'Erro ao excluir a câmera')
+      setConfirmarExclusao(false)
+    } finally {
+      setExcluindo(false)
     }
   }
 
@@ -1068,6 +1115,27 @@ export function Cameras() {
         confirmLabel="Arquivar"
         variant="primary"
         loading={arquivando}
+      />
+      {/* Diz o que se PERDE e o que NÃO se perde. A frase sobre alertas e
+          evidências não é conforto: é o que o backend de fato faz (exclusão
+          lógica, migration 138) — se um dia virar DELETE físico, esta frase
+          vira mentira e o teste de `soft_delete` cai antes. */}
+      <ConfirmDialog
+        open={confirmarExclusao}
+        onClose={() => setConfirmarExclusao(false)}
+        onConfirm={() => { void excluir() }}
+        title="Excluir câmera"
+        description={
+          `A câmera "${selecionada?.name}" sai do sistema: some desta lista, do Ao Vivo, ` +
+          'dos quadros do grid e do escopo de modelo, e o equipamento do site para de ligá-la. ' +
+          'Não dá para desfazer — para tê-la de volta é preciso cadastrar de novo. ' +
+          'NÃO são apagados: os alertas, as evidências gravadas e os frames de treino já ' +
+          'anotados dela continuam no histórico. Para tirar do reconhecimento sem excluir, ' +
+          'use Arquivar.'
+        }
+        confirmLabel="Excluir para sempre"
+        variant="danger"
+        loading={excluindo}
       />
     </>
   )
@@ -1223,7 +1291,20 @@ export function Cameras() {
                     {selecionada.is_active === false ? 'Desarquivar' : 'Arquivar'}
                   </button>
                 )}
+                {podeExcluir && (
+                  <button
+                    className={s.botaoPerigo}
+                    disabled={excluindo}
+                    onClick={() => setConfirmarExclusao(true)}
+                  >
+                    <Trash2 size={13} strokeWidth={1.7} /> Excluir
+                  </button>
+                )}
               </div>
+
+              {erroAcao && (
+                <div className={`${s.resultado} ${s.tom.nc}`} role="status">{erroAcao}</div>
+              )}
 
               {(teste || erroTeste) && (
                 <div className={s.painelTeste}>

@@ -101,6 +101,26 @@ export const botaoSecundario = style({
   ':disabled': { opacity: 0.5, cursor: 'not-allowed' },
 })
 
+/** Ação destrutiva (Excluir câmera). Estilo PRÓPRIO, não `botaoSecundario`
+ *  + cor: o hover do secundário pinta de ciano, e um botão que fica ciano ao
+ *  passar o mouse lê como ação segura — o oposto do que este botão faz. */
+export const botaoPerigo = style({
+  height: '32px',
+  padding: '0 13px',
+  background: 'transparent',
+  border: `1px solid ${lk.estado.nc}`,
+  borderRadius: '7px',
+  color: lk.estado.nc,
+  fontFamily: lk.fonte.ui,
+  fontSize: '12.5px',
+  cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '6px',
+  ':hover': { background: lk.estado.nc, color: lk.cor.brancoSinal },
+  ':disabled': { opacity: 0.5, cursor: 'not-allowed' },
+})
+
 // ── aba Câmeras: lista + detalhe ─────────────────────────────────────────────
 
 export const split = style({ display: 'flex', gap: '14px', alignItems: 'flex-start' })

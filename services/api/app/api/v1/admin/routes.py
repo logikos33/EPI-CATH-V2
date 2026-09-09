@@ -2584,7 +2584,9 @@ def get_inventory():
             except (ValueError, TypeError):
                 return error("camera_id inválido", 400)
 
-        conditions = ["1=1"]
+        # Câmera excluída pelo dono (migration 138) não aparece nem para o
+        # superadmin: "some de TODAS as telas" inclui o inventário.
+        conditions = ["1=1", "c.deleted_at IS NULL"]
         params: list = []
         if tenant_filter:
             conditions.append("c.tenant_id = %s")
