@@ -14,7 +14,7 @@
  * D-48 (opção C) — renovação proativa: o token de contexto tem TTL curto
  * (30min, TENANT_CONTEXT_TTL_MINUTES espelhado abaixo). scheduleTenantContextRenewal
  * agenda um POST /tenant-context/renew ~5min antes do TTL expirar, trocando
- * o token em localStorage SEM reload — uma sessão de trabalho longa não cai
+ * o token da sessão da aba SEM reload — uma sessão de trabalho longa não cai
  * no meio. Falha no renew não reagenda: o token simplesmente expira e o
  * branch 401 de services/api.ts já cuida de restaurar o superadmin.
  */
@@ -27,6 +27,7 @@ import {
   TENANT_CONTEXT_BACKUP_KEY,
   TENANT_CONTEXT_META_KEY,
 } from './api'
+import { gravarSessao, lerSessao } from './sessao'
 
 export interface AvailableTenant {
   id: string
@@ -68,13 +69,13 @@ export async function listAvailableTenants(): Promise<AvailableTenant[]> {
 
 /** Há um contexto de tenant assumido ativo neste navegador? */
 export function isInTenantContext(): boolean {
-  return localStorage.getItem(TENANT_CONTEXT_META_KEY) !== null
+  return lerSessao(TENANT_CONTEXT_META_KEY) !== null
 }
 
 /** Metadados do contexto assumido (nome/slug do tenant) — p/ o banner. */
 export function getTenantContextMeta(): TenantContextMeta | null {
   try {
-    return JSON.parse(localStorage.getItem(TENANT_CONTEXT_META_KEY) || 'null')
+    return JSON.parse(lerSessao(TENANT_CONTEXT_META_KEY) || 'null')
   } catch {
     return null
   }
@@ -112,9 +113,9 @@ export async function assumeTenantContext(
   const { token, tenant, user } = res.data
 
   // Backup do superadmin ANTES de trocar o token
-  const backup = { token: getToken(), user: localStorage.getItem('user') }
-  localStorage.setItem(TENANT_CONTEXT_BACKUP_KEY, JSON.stringify(backup))
-  localStorage.setItem(
+  const backup = { token: getToken(), user: lerSessao('user') }
+  gravarSessao(TENANT_CONTEXT_BACKUP_KEY, JSON.stringify(backup))
+  gravarSessao(
     TENANT_CONTEXT_META_KEY,
     JSON.stringify({
       tenant_id: tenant.id,
@@ -124,7 +125,7 @@ export async function assumeTenantContext(
     } satisfies TenantContextMeta),
   )
   setToken(token)
-  localStorage.setItem('user', JSON.stringify(user))
+  gravarSessao('user', JSON.stringify(user))
   window.location.href = destino
 }
 
@@ -144,7 +145,8 @@ export function exitTenantContext(): void {
 
 /** Espelha TENANT_CONTEXT_TTL_MINUTES de app/core/tenant_context.py — usado
  * SOMENTE como fallback quando o exp do próprio token não é legível; a fonte
- * da verdade do agendamento é o claim `exp` do JWT em localStorage. */
+ * da verdade do agendamento é o claim `exp` do JWT da sessão da aba
+ * (services/sessao.ts). */
 const TENANT_CONTEXT_TTL_MINUTES = 30
 /** Renova com essa folga antes do TTL expirar. */
 const RENEW_BEFORE_EXPIRY_MINUTES = 5
@@ -195,7 +197,7 @@ export async function renewTenantContext(): Promise<void> {
   const res = await api.post<RenewContextResponse>('/v1/admin/tenant-context/renew', {})
   const { token, user } = res.data
   setToken(token)
-  localStorage.setItem('user', JSON.stringify(user))
+  gravarSessao('user', JSON.stringify(user))
 }
 
 /**

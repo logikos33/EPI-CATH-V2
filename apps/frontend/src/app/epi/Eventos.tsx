@@ -69,7 +69,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { NavLink, useSearchParams } from 'react-router-dom'
 import {
   AlertTriangle, Check, CheckCircle, ChevronDown, ChevronLeft, ChevronRight,
-  Circle, Clock, Download, HelpCircle, Inbox, RefreshCw, ShieldCheck, XCircle,
+  Circle, Clock, Download, Eye, HelpCircle, Inbox, RefreshCw, ShieldCheck, XCircle,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -93,6 +93,7 @@ import type { Camera } from '../../types'
 import { LogikosLoader } from '../shell/LogikosLoader'
 import * as s from './Eventos.css'
 import { rotaNova } from '../RotasNovas'
+import { PainelEvidencia, type ResultadoVeredito } from './PainelEvidencia'
 
 const MODULO = 'epi'
 const POR_PAGINA = 20
@@ -246,6 +247,12 @@ export function Eventos() {
   const [destaque, setDestaque] = useState<string | null>(() => parametros.get('highlight'))
   const refDestaque = useRef<HTMLTableRowElement | null>(null)
 
+  /** Evento aberto na gaveta de evidência — julgar SEM sair da lista. Guarda o
+   *  ID, não o objeto: depois de cada veredito a lista é relida e os objetos
+   *  são outros; o ID é o que sobrevive à releitura e mantém a posição. */
+  const [abertoId, setAbertoId] = useState<string | null>(null)
+  const refAberto = useRef<HTMLTableRowElement | null>(null)
+
   // Rajadas expandidas (id do representante) — ux2/dedup: por padrão o
   // representante fica sozinho na tela; expandir mostra as N repetições.
   const [expandidos, setExpandidos] = useState<Set<string>>(new Set())
@@ -274,8 +281,16 @@ export function Eventos() {
     return p
   }, [filtros])
 
-  const carregar = useCallback(async () => {
-    setCarregando(true)
+  /**
+   * `silencioso` NÃO é enfeite: sem ele, todo veredito trocava a tabela pelo
+   * loader de tela inteira — a gaveta desmontava, a rolagem voltava ao topo e
+   * quem estava na linha 14 de 20 perdia o lugar a cada decisão. É exatamente
+   * o "sem sair da lista" que esta rodada existe para entregar. A releitura
+   * continua vindo do SERVIDOR (nada de carimbar o veredito na mão no objeto
+   * local, que seria afirmar autoria sem ter lido a resposta) — só não pisca.
+   */
+  const carregar = useCallback(async (silencioso = false) => {
+    if (!silencioso) setCarregando(true)
     setErro(null)
     try {
       const p = consulta()
@@ -313,6 +328,12 @@ export function Eventos() {
   useEffect(() => {
     if (podeLer) void carregar()
   }, [carregar, podeLer])
+
+  // Avançar na gaveta tem de mover a LISTA junto — senão a linha aberta some
+  // atrás do painel e "sem perder a posição" vira só uma frase.
+  useEffect(() => {
+    if (abertoId) refAberto.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [abertoId])
 
   // Nomes de câmera para o filtro do desenho ("CAM-04 Expedição"). Degrada em
   // silêncio: sem a lista, o filtro some — nunca vira campo de digitar UUID.
@@ -437,17 +458,29 @@ export function Eventos() {
 
   /**
    * Veredito humano — reusa `POST /api/verification/<id>/review`, que carimba
-   * `verified_by='user:<id>'` (a prova que a coluna VEREDITO lê). O MOTIVO
-   * (`reason`) é campo da tela de detalhe, onde há espaço para escrever: aqui
-   * o veredito é rápido e vai SEM motivo, exatamente como hoje — nunca com
-   * motivo vazio, que gravaria "justificado" sobre uma justificativa que
-   * ninguém deu. O motivo já registrado aparece abaixo do selo.
+   * `verified_by='user:<id>'` (a prova que a coluna VEREDITO lê).
+   *
+   * O MOTIVO (`reason`) é OPCIONAL AQUI e obrigatório na gaveta de evidência.
+   * Os dois botões da LINHA seguem indo sem motivo, exatamente como hoje —
+   * nunca com motivo vazio, que gravaria "justificado" sobre uma justificativa
+   * que ninguém deu. Quem abre a evidência para julgar escolhe um motivo da
+   * lista fechada, igual à tela de Verificação: lá a pessoa está OLHANDO o
+   * frame, e é dali que sai a informação que recalibra o modelo.
+   *
+   * Devolve o desfecho em vez de engoli-lo: a gaveta precisa saber se avança
+   * (veredito registrado, ou 409 de quem julgou primeiro) ou se fica onde
+   * está (falha de verdade).
    */
-  const julgar = async (id: string, verdict: 'approve' | 'reject') => {
+  const julgar = async (
+    id: string,
+    verdict: 'approve' | 'reject',
+    reason?: string,
+  ): Promise<ResultadoVeredito> => {
     setOcupado(id)
     try {
-      await api.post(`/verification/${id}/review`, { verdict })
-      await carregar()
+      await api.post(`/verification/${id}/review`, { verdict, ...(reason ? { reason } : {}) })
+      await carregar(true)
+      return 'ok'
     } catch (e) {
       // 409 = OUTRA PESSOA julgou este alerta primeiro (guarda
       // `verification_verdict IS NULL OR verified_by = <eu>` do UPDATE, em
@@ -458,10 +491,11 @@ export function Eventos() {
       // registrar" genérico faz o operador clicar de novo no que já resolveu.
       if (e instanceof ApiError && e.status === 409) {
         toast.info('Alerta já revisado', e.message)
-        await carregar()
-        return
+        await carregar(true)
+        return 'conflito'
       }
       toast.error('Não foi possível registrar o veredito')
+      return 'erro'
     } finally {
       setOcupado(null)
     }
@@ -502,6 +536,47 @@ export function Eventos() {
     [eventos],
   )
 
+  /**
+   * A ordem em que as linhas APARECEM — representante e, se a rajada estiver
+   * expandida, as repetições reveladas. É por ela que a gaveta anda.
+   *
+   * Andar pela página crua (`eventos`) levaria a evento recolhido dentro de
+   * uma rajada: a gaveta trocaria de frame e NENHUMA linha se acenderia atrás
+   * dela. Quem opera perderia a referência de onde está — que é justamente o
+   * que esta rodada veio consertar.
+   */
+  const ordemVisivel = useMemo(() => {
+    const linhas: Evento[] = []
+    for (const g of grupos) {
+      linhas.push(g.representante)
+      if (expandidos.has(g.representante.id)) {
+        for (const rep of g.repeticoes) if (rep.id !== g.representante.id) linhas.push(rep)
+      }
+    }
+    return linhas
+  }, [grupos, expandidos])
+
+  const indiceAberto = abertoId ? ordemVisivel.findIndex((ev) => ev.id === abertoId) : -1
+  const eventoAberto = indiceAberto >= 0 ? ordemVisivel[indiceAberto] : null
+
+  /** Anda na ordem visível; no fim da página FICA onde está (não fecha nem
+   *  pula para outra página — a paginação é escolha explícita de quem opera). */
+  const irParaVisivel = (i: number) => {
+    const alvo = ordemVisivel[i]
+    if (alvo) setAbertoId(alvo.id)
+  }
+
+  /**
+   * Trabalho que sobra NESTA PÁGINA. O eixo vai no rótulo, e não é
+   * preciosismo: `total`/`total_situacoes` falam do filtro INTEIRO (todas as
+   * páginas) e este número fala das 20 linhas carregadas — misturar os dois
+   * escopos num único badge é o defeito que o cabeçalho deste arquivo
+   * documenta. É ele que cai a cada veredito, sem recarregar a tela.
+   */
+  const semVeredito = eventos.filter(
+    (ev) => vereditoHumano(ev.verification_verdict, ev.verified_by) === 'nao-revisado',
+  ).length
+
   if (!podeLer) {
     return (
       <div className={s.painelCentral}>
@@ -538,11 +613,16 @@ export function Eventos() {
       && classificarLatencia(ev.timestamp, ev.created_at) === 'retroativa'
     const marcado = selecionados.includes(ev.id)
     const realcada = ev.id === destaque
+    const aberta = ev.id === abertoId
     return (
       <tr
         key={ev.id}
-        ref={realcada ? refDestaque : undefined}
-        className={[realcada ? s.linhaDestacada : '', atenuada ? s.linhaRepeticao : '']
+        ref={realcada ? refDestaque : aberta ? refAberto : undefined}
+        className={[
+          realcada ? s.linhaDestacada : '',
+          aberta ? s.linhaAberta : '',
+          atenuada ? s.linhaRepeticao : '',
+        ]
           .filter(Boolean)
           .join(' ') || undefined}
       >
@@ -686,6 +766,17 @@ export function Eventos() {
               Reconhecer
             </button>
           )}
+          {/* O caminho curto: frame inteiro + lupa + veredito SEM sair daqui.
+              "Abrir →" continua ao lado porque a tela inteira faz o que a
+              gaveta não faz (corrigir a marcação, ver o histórico). */}
+          <button
+            className={s.botao}
+            aria-label={`Ver evidência do evento de ${ev.camera_name ?? 'câmera'}`}
+            onClick={() => setAbertoId(ev.id)}
+          >
+            <Eye size={15} strokeWidth={1.7} aria-hidden="true" />
+            Ver evidência
+          </button>
           <NavLink className={s.botao} to={rotaNova(`/epi/eventos/${ev.id}`)}>
             Abrir →
           </NavLink>
@@ -920,6 +1011,12 @@ export function Eventos() {
                 ? `${dados.total_situacoes} SITUAÇÕES (POR HORA DE GRAVAÇÃO) · ${dados.total} EVENTOS`
                 : `${dados?.total ?? 0} EVENTOS`}
             </span>
+            {/* Escopo DIFERENTE do número ao lado, e por isso separado e
+                nomeado: aquele fala do filtro inteiro, este das linhas
+                carregadas. É o que anda a cada veredito dado na gaveta. */}
+            <span className={s.overlineLegenda}>
+              {semVeredito} SEM VEREDITO NESTA PÁGINA
+            </span>
             <span className={s.espacador} />
             <button
               className={s.botao}
@@ -947,6 +1044,22 @@ export function Eventos() {
             em ≤2 cliques: Abrir → Confirmar / Criar ação.
           </span>
         </>
+      )}
+
+      {/* Só renderiza quando o evento aberto AINDA existe na página relida —
+          gaveta sobre um evento que sumiu do recorte mostraria dado de um
+          estado que não é mais o da lista atrás dela. */}
+      {eventoAberto && (
+        <PainelEvidencia
+          key={eventoAberto.id}
+          evento={eventoAberto}
+          posicao={indiceAberto + 1}
+          totalVisivel={ordemVisivel.length}
+          aoAnterior={() => irParaVisivel(indiceAberto - 1)}
+          aoProximo={() => irParaVisivel(indiceAberto + 1)}
+          aoFechar={() => setAbertoId(null)}
+          aoJulgar={julgar}
+        />
       )}
     </div>
   )

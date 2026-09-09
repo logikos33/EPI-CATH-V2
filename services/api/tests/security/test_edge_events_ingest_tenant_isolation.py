@@ -139,10 +139,17 @@ class TestUploaderRequestIsAcceptedByIngestRoute:
 
         assert resp.status_code == 200, (path, resp.get_json())
         data = resp.get_json()["data"]
+        # `alerts_created`/`alerts_failed`: a detecção do box também tem de
+        # virar linha em `alerts` (edge_events não tem leitor no produto).
+        # Neste teste não há DatabasePool nem câmera, então o alerta FALHA — e
+        # o contrato exige que a falha apareça na resposta em vez de sumir.
+        # É exatamente esse número que prova que ela não some.
         assert data == {
             "ingested": 1,
             "submitted": 1,
             "batch_id": headers["X-Batch-Id"],
+            "alerts_created": 0,
+            "alerts_failed": 1,
         }
         kw = ingest_repo.ingest.call_args.kwargs
         assert kw["tenant_id"] == str(tenant_id)

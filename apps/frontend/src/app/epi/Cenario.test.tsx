@@ -51,9 +51,27 @@ import { Cenario } from './Cenario'
 const CAMERA_ID = 'cam-1'
 
 const CLASSES = [
-  { class_name: 'capacete', display_name: 'Capacete' },
-  { class_name: 'colete', display_name: 'Colete refletivo' },
+  { class_name: 'capacete', display_name: 'Capacete', polaridade: 'conformidade' },
+  { class_name: 'colete', display_name: 'Colete refletivo', polaridade: 'violacao' },
 ]
+
+/** O que o RVB tem de verdade no cadastro: a calibração da ADR-0067
+ * (`scripts/ops/aplicar_calibracao_rvb.py`) rebaixou esta classe para
+ * INDECISA — `yolo_classes.is_violation IS NULL`. O endpoint que enche a tela
+ * (`GET /modules/epi/classes`) devolve `polaridade: 'indefinida'` e continua
+ * listando; `EpiZoneOperation._classes_validas()` NÃO a inclui (soma
+ * `presence_class_names` + `violation_class_names`, ambas filtrando
+ * `is_violation IS TRUE`/`IS FALSE`). Era isto que a tela oferecia e o
+ * backend recusava. */
+const CLASSE_INDECISA = {
+  class_name: 'Sem Óculos',
+  display_name: 'Sem Óculos',
+  polaridade: 'indefinida',
+}
+
+/** A recusa literal do backend, copiada de `epi_zone.validate_config`. */
+const ERRO_DO_BACKEND =
+  "Configuração inválida: classe inválida: 'Sem Óculos' não pertence ao módulo epi deste cliente"
 
 /** Config REAL de `epi_zone.py` — zone_points + watch_classes. */
 const opEpi = (extra: Record<string, unknown> = {}) => ({
@@ -71,11 +89,20 @@ const opEpi = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 })
 
-function servir(ops: unknown[]) {
+function servir(
+  ops: unknown[],
+  opcoes: { classes?: unknown[]; escopo?: string[] | null } = {},
+) {
+  const catalogo = opcoes.classes ?? CLASSES
   get.mockImplementation((path: string) => {
+    if (path.includes('/model-config')) {
+      return Promise.resolve({
+        data: { deployment: opcoes.escopo ? { config: { classes: opcoes.escopo } } : null },
+      })
+    }
     if (path.includes('/operations')) return Promise.resolve({ data: { operations: ops } })
     if (path.startsWith('/modules/') && path.includes('/classes')) {
-      return Promise.resolve({ data: { classes: CLASSES } })
+      return Promise.resolve({ data: { classes: catalogo } })
     }
     if (path === '/modules/') return Promise.resolve({ data: { modules: [{ id: 'mod-epi', module_code: 'epi' }] } })
     if (path === `/cameras/${CAMERA_ID}`) {
@@ -316,5 +343,104 @@ describe('sem permissão', () => {
     expect(
       screen.getByText(/ela está gravando, mas ninguém disse o que observar\. desenhe a primeira zona/i),
     ).toBeTruthy()
+  })
+})
+
+
+describe('a lista oferecida é subconjunto do que o backend aceita', () => {
+  /**
+   * A DIVERGÊNCIA, medida nos dois lados:
+   *
+   *   OFERECE  `GET /modules/epi/classes` → `module_service.get_classes()`:
+   *            catálogo global ∪ classes do tenant, sem filtro de polaridade.
+   *   ACEITA   `EpiZoneOperation._classes_validas()`: presença ∪ violação, e
+   *            as duas filtram `is_violation IS TRUE`/`IS FALSE`.
+   *
+   * Logo: classe com polaridade indecisa é oferecida e recusada. O teste
+   * atravessa o render de verdade e olha o que a tela MANDA na rota — não o
+   * estado interno.
+   */
+  it('a classe indecisa aparece marcada como indisponível, com motivo, e não entra no que é salvo', async () => {
+    servir([], { classes: [...CLASSES, CLASSE_INDECISA] })
+    montar()
+    await abrirTemplateEpi()
+
+    const chip = screen.getByRole('button', { name: /sem óculos/i })
+    expect((chip as HTMLButtonElement).disabled).toBe(true)
+    // O motivo é VISÍVEL, não só um `title` que ninguém lê no demo.
+    expect(screen.getByText(/decida a polaridade no estúdio/i)).toBeTruthy()
+
+    fireEvent.click(chip)
+    fireEvent.change(screen.getByPlaceholderText(/nome deste lugar/i), { target: { value: 'Doca 3' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Capacete' }))
+    fireEvent.click(await screen.findByRole('button', { name: /salvar e começar a valer/i }))
+
+    const corpo = post.mock.calls[0][1] as { config: { watch_classes: string[] } }
+    expect(corpo.config.watch_classes).toEqual(['capacete'])
+  })
+
+  it('a trava é a do epi_zone, não da tela: na linha de contagem a mesma classe é escolhível', async () => {
+    // `counting_line.validate_config` só exige que `target_class` não venha
+    // vazio — marcar "indisponível" ali seria a mentira ao contrário.
+    servir([], { classes: [...CLASSES, CLASSE_INDECISA] })
+    montar()
+    fireEvent.click(await screen.findByRole('button', { name: /desenhar nova regra/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /linha de contagem/i }))
+    await screen.findByPlaceholderText(/nome deste lugar/i)
+
+    const chip = screen.getByRole('button', { name: /sem óculos/i })
+    expect((chip as HTMLButtonElement).disabled).toBe(false)
+
+    fireEvent.change(screen.getByPlaceholderText(/nome deste lugar/i), { target: { value: 'Portão' } })
+    fireEvent.click(chip)
+    fireEvent.click(await screen.findByRole('button', { name: /salvar e começar a valer/i }))
+
+    const corpo = post.mock.calls[0][1] as { config: { target_class: string } }
+    expect(corpo.config.target_class).toBe('Sem Óculos')
+  })
+
+  it('recusa que a tela não previu vira marca no chip citado, com saída', async () => {
+    // Rede de segurança: seja qual for o motivo da recusa, o operador vê em
+    // QUAL classe está o problema — e consegue tirá-la e salvar.
+    servir([], { classes: [...CLASSES, { ...CLASSE_INDECISA, polaridade: 'violacao' }] })
+    post.mockRejectedValueOnce(new Error(ERRO_DO_BACKEND))
+    montar()
+    await abrirTemplateEpi()
+
+    fireEvent.change(screen.getByPlaceholderText(/nome deste lugar/i), { target: { value: 'Doca 3' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Capacete' }))
+    fireEvent.click(screen.getByRole('button', { name: /sem óculos/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /salvar e começar a valer/i }))
+
+    expect(await screen.findByText(/o backend recusou esta classe/i)).toBeTruthy()
+    // Escolhida + recusada continua clicável — só para TIRAR (sem beco).
+    const chip = screen.getByRole('button', { name: /sem óculos/i })
+    expect((chip as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(chip)
+    fireEvent.click(screen.getByRole('button', { name: /salvar e começar a valer/i }))
+    const corpo = post.mock.calls[1][1] as { config: { watch_classes: string[] } }
+    expect(corpo.config.watch_classes).toEqual(['capacete'])
+  })
+})
+
+describe('o que o modelo desta câmera enxerga', () => {
+  it('sem modelo próprio, a tela NÃO afirma o que a câmera reconhece', async () => {
+    servir([], { escopo: null })
+    montar()
+    await abrirTemplateEpi()
+    expect(screen.getByText(/não dá para afirmar aqui o que ela reconhece/i)).toBeTruthy()
+    expect(screen.queryByText(/fora do escopo/i)).toBeNull()
+  })
+
+  it('com escopo gravado, marca o que está fora dele — mas deixa escolher, porque salva', async () => {
+    servir([], { escopo: ['capacete'] })
+    montar()
+    await abrirTemplateEpi()
+
+    const fora = screen.getByRole('button', { name: /colete refletivo/i })
+    expect((fora as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByText(/nunca dispara aqui/i)).toBeTruthy()
+    // A que está no escopo não é marcada.
+    expect(screen.getByRole('button', { name: 'Capacete' })).toBeTruthy()
   })
 })
