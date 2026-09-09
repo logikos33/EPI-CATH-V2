@@ -266,10 +266,15 @@ export const corVeredito = styleVariants({
   'nao-revisado': { color: lk.cor.cinzaNevoa },
 })
 
-/** Estado de fluxo (reconhecimento) — terceiro eixo, terceira paleta. */
+/** Estado de FLUXO — terceiro eixo, terceira paleta. Três degraus: ninguém
+ *  tocou (atenção), alguém deu ciência (ok), alguém julgou (ok, e o veredito
+ *  em si mora na coluna ao lado). "Avaliado" NÃO ganha cor de veredito: se
+ *  procedente e falso positivo tivessem cores diferentes aqui, esta coluna
+ *  viraria uma segunda coluna de veredito. */
 export const corStatus = styleVariants({
   novo: { color: lk.estado.atencao },
   reconhecido: { color: lk.estado.ok },
+  avaliado: { color: lk.estado.ok },
 })
 
 /** Procedência temporal — só a afirmação NEGATIVA ("coleta retroativa"). */
@@ -359,14 +364,6 @@ export const overlineLegenda = style({
   letterSpacing: OVERLINE_TRACKING,
   textTransform: 'uppercase',
   color: lk.cor.cinzaNevoa,
-})
-
-/** Par de botões de veredito dentro da célula. */
-export const grupoBotoes = style({
-  display: 'flex',
-  gap: '6px',
-  marginTop: '6px',
-  '@media': { [TELA_ESTREITA]: { flexDirection: 'column' } },
 })
 
 /** Confiança da detecção (§9 paridade) — dado, então mono; cinza, sem cor de estado. */

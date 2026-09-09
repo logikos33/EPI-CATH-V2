@@ -233,12 +233,20 @@ class SnapshotExecutor:
 
     # ── evidência de alerta ──────────────────────────────────────────────
 
-    def capture_evidence(self, camera_id: str) -> "str | None":
-        """Captura UM frame e o sobe como evidência; devolve a chave R2 ou None.
+    def capture_evidence(self, camera_id: str) -> "tuple[str | None, bytes | None]":
+        """Captura UM frame e o sobe como evidência; devolve `(chave R2, JPEG)`.
 
         Mesmo par captura+upload do snapshot, e de propósito o MESMO breaker:
         uma credencial rejeitada tem de parar TODO acesso ao gravador, não só
         o caminho que a descobriu (anti-lockout, CLAUDE.md).
+
+        O JPEG volta junto porque quem chama (`DetectionRelay`) precisa OLHAR o
+        quadro antes de decidir se o evento vira alerta — é o `GuardaPessoa`,
+        que barra cena sem gente. Devolver só a chave fazia o pixel morrer aqui
+        dentro, e a alternativa seria uma segunda captura: outra conexão RTSP no
+        mesmo gravador que pune tentativa repetida. Os dois valores são
+        independentes — `(None, jpeg)` é upload que falhou sobre um frame bom, e
+        o guarda ainda pode julgá-lo.
 
         Nunca levanta. Evidência é desejável, não pode bloquear o alerta —
         quem chama enfileira o evento com `None` e a nuvem grava o alerta sem
@@ -248,24 +256,24 @@ class SnapshotExecutor:
             logger.warning(
                 "evidence_capture_skipped camera_id=%s reason=circuito_aberto", camera_id
             )
-            return None
+            return None, None
         try:
             jpeg_bytes = self._recorder.get_snapshot(camera_id)
         except RecorderAuthError as exc:
             self._trip_circuit(str(exc))
-            return None
+            return None, None
         except Exception as exc:  # noqa: BLE001 — sem sinal/timeout/canal: sem evidência, com alerta
             logger.warning(
                 "evidence_capture_failed camera_id=%s err=%s", camera_id, exc
             )
-            return None
+            return None, None
         try:
             r2_key = self._upload(camera_id, jpeg_bytes, rota="evidence")
         except SnapshotUploadError as exc:
             logger.warning("evidence_upload_failed camera_id=%s err=%s", camera_id, exc)
-            return None
+            return None, jpeg_bytes
         logger.info(
             "evidence_uploaded camera_id=%s r2_key=%s bytes=%d",
             camera_id, r2_key, len(jpeg_bytes),
         )
-        return r2_key
+        return r2_key, jpeg_bytes

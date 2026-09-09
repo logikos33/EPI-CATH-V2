@@ -69,7 +69,8 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { NavLink, useSearchParams } from 'react-router-dom'
 import {
   AlertTriangle, Check, CheckCircle, ChevronDown, ChevronLeft, ChevronRight,
-  Circle, Clock, Download, Eye, HelpCircle, Inbox, RefreshCw, ShieldCheck, XCircle,
+  Circle, CheckCircle2, Clock, Download, Eye, HelpCircle, Inbox, RefreshCw,
+  ShieldCheck, XCircle,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -205,6 +206,64 @@ const ICONE_VEREDITO: Record<Veredito, LucideIcon> = {
   'nao-revisado': Clock,
 }
 
+// ── STATUS = QUÃO LONGE o evento andou no fluxo ─────────────────────────────
+//
+// Defeito relatado pelo dono em 09/09/2026, com a tela em operação: linha com
+// veredito humano PROCEDENTE e a coluna STATUS ainda dizendo "NOVO".
+//
+// Causa: a célula lia SÓ `ev.acknowledged` (booleano) — e julgar não mexe em
+// `acknowledged`; mexe em `verification_verdict`/`verified_by`. Duas colunas,
+// dois atos, e a tela só olhava um deles. Nada estava errado no banco: o
+// evento julgado É `acknowledged=false`. Errado era a tela chamar isso de
+// "Novo", que é a palavra que manda o operador ir olhar.
+//
+// Conserto SEM misturar os eixos que o cabeçalho deste arquivo separa: STATUS
+// continua sendo fluxo de trabalho, só que com o degrau que faltava. O que
+// entra aqui é o FATO de ter sido julgado, nunca o CONTEÚDO do julgamento —
+// "Procedente" e "Falso positivo" seguem morando só na coluna VEREDITO, com a
+// paleta delas. Um evento julgado não é novo, seja qual for o veredito.
+//
+//   novo → reconhecido → avaliado
+//
+// Derivar na tela (em vez de gravar `acknowledged=true` ao julgar) conserta de
+// graça as centenas de linhas JÁ julgadas hoje pelo dono: elas passam a ler
+// certo sem UPDATE em massa nem migration de dados.
+type StatusFluxo = 'novo' | 'reconhecido' | 'avaliado'
+
+const ROTULO_STATUS: Record<StatusFluxo, string> = {
+  novo: 'Novo',
+  reconhecido: 'Reconhecido',
+  avaliado: 'Avaliado',
+}
+
+const EXPLICACAO_STATUS: Record<StatusFluxo, string> = {
+  novo: 'Ninguém deu ciência nem julgou este evento.',
+  reconhecido: 'Alguém deu ciência. Ainda sem veredito de procedência.',
+  avaliado: 'Uma pessoa abriu a evidência e julgou. O veredito está na coluna ao lado.',
+}
+
+const ICONE_STATUS: Record<StatusFluxo, LucideIcon> = {
+  novo: Circle,
+  reconhecido: Check,
+  avaliado: CheckCircle2,
+}
+
+/** Função PURA — a MESMA regra que o servidor usa para mandar julgado para o
+ *  fim da fila (`AlertRepository._JULGADO_POR_HUMANO_SQL`). */
+function statusDoFluxo(ev: Evento): StatusFluxo {
+  if (vereditoHumano(ev.verification_verdict, ev.verified_by) !== 'nao-revisado') {
+    return 'avaliado'
+  }
+  return ev.acknowledged ? 'reconhecido' : 'novo'
+}
+
+/** Julgado por GENTE — o critério da ordem da fila e do degrau "Avaliado". */
+const julgadoPorHumano = (ev: Evento) =>
+  vereditoHumano(ev.verification_verdict, ev.verified_by) !== 'nao-revisado'
+
+/** Ainda cabe "Reconhecer"? Só o que ninguém deu ciência NEM julgou. */
+const podeReconhecer = (ev: Evento) => !ev.acknowledged && !julgadoPorHumano(ev)
+
 /** Intervalo do período. "Hoje" é o dia corrente de verdade, não 24h rolantes. */
 function intervaloDoPeriodo(periodo: Periodo): { from: string; to: string } {
   if (periodo === 'hoje') {
@@ -265,7 +324,10 @@ export function Eventos() {
     })
 
   const podeLer = can('alerts:read')
-  const podeJulgar = can('alerts:feedback')
+  // `alerts:feedback` NÃO é lido aqui: desde que o veredito saiu da linha,
+  // quem gateia julgar é a gaveta (`PainelEvidencia`, que chama o mesmo
+  // `can('alerts:feedback')`). Um gate a mais nesta tela seria só uma segunda
+  // cópia da mesma regra, livre para divergir da primeira.
   const podeExportar = can('alerts:export')
 
   /** Querystring da listagem — a MESMA base do CSV, para o export sair no recorte da tela. */
@@ -296,7 +358,8 @@ export function Eventos() {
       const p = consulta()
       // PAGINAÇÃO POR PÁGINA, como a tela antiga e como o backend calcula o
       // OFFSET (`(page-1)*per_page`, alerts/routes.py). Não trocar por cursor
-      // nem por offset cru: a ordenação é `created_at DESC` e qualquer outro
+      // nem por offset cru: a ordenação é determinística no SERVIDOR (julgado
+      // por último, depois hora DESC, `a.id` de desempate) e qualquer outro
       // mecanismo aqui reabre o buraco de linhas puladas entre páginas.
       p.set('page', String(filtros.pagina))
       p.set('per_page', String(POR_PAGINA))
@@ -523,20 +586,40 @@ export function Eventos() {
   }
 
   const eventos = dados?.alerts ?? []
-  const selecionaveis = eventos.filter((e) => !e.acknowledged).map((e) => e.id)
+  const selecionaveis = eventos.filter(podeReconhecer).map((e) => e.id)
 
-  // ux2/dedup: agrupa a PÁGINA carregada por câmera+classe+60s — mesma
-  // janela do backend (VerificationService). Só reagrupa a página atual, não
-  // reordena entre páginas (a ordenação continua `created_at DESC` do
-  // servidor); "situações" no badge do cabeçalho/rodapé vem de
-  // `total_situacoes` (o filtro INTEIRO), não deste agrupamento local.
+  /**
+   * ux2/dedup: agrupa a PÁGINA carregada por câmera+classe+60s — mesma janela
+   * do backend (VerificationService). "Situações" no badge do cabeçalho/rodapé
+   * vem de `total_situacoes` (o filtro INTEIRO), não deste agrupamento local.
+   *
+   * ⚠️ **A ORDEM DA FILA PRECISA DAS DUAS METADES.** O servidor já manda
+   * julgado por último (`AlertRepository._JULGADO_POR_HUMANO_SQL`, ANTES do
+   * LIMIT/OFFSET — é ele quem decide QUAIS 20 linhas a página traz). Mas
+   * `agruparPorRajada` **descarta a ordem de entrada**: ele reagrupa por chave
+   * e reordena os grupos por hora do representante (ver `rajadas.ts`). Sem o
+   * `sort` abaixo, o trabalho do servidor chegava na tela e era jogado fora —
+   * o operador continuaria vendo julgado no meio da lista.
+   *
+   * O `sort` é ESTÁVEL (garantia da spec desde ES2019), então dentro de cada
+   * balde a cronologia que veio do servidor sobrevive intacta: não-julgado
+   * mais recente primeiro, e só depois os julgados, também do mais recente.
+   *
+   * Grupo afunda só quando TODAS as suas linhas foram julgadas. Uma rajada de
+   * 30 repetições com 29 julgadas ainda tem trabalho, e trabalho não se
+   * esconde no rodapé por causa do representante.
+   */
   const grupos = useMemo(
     () =>
       agruparPorRajada(eventos, {
         cameraId: (ev) => ev.camera_id ?? '',
         classe: (ev) => ev.violations?.[0]?.class ?? '',
         criadoEm: (ev) => ev.timestamp ?? ev.created_at,
-      }),
+      }).sort(
+        (a, b) =>
+          Number(a.repeticoes.every(julgadoPorHumano)) -
+          Number(b.repeticoes.every(julgadoPorHumano)),
+      ),
     [eventos],
   )
 
@@ -631,7 +714,7 @@ export function Eventos() {
           .join(' ') || undefined}
       >
         <td className={s.celula}>
-          {!ev.acknowledged && (
+          {podeReconhecer(ev) && (
             <input
               type="checkbox"
               className={s.caixaSelecao}
@@ -697,18 +780,19 @@ export function Eventos() {
         </td>
 
         <td className={s.celula}>
-          <span
-            className={`${s.selo} ${
-              ev.acknowledged ? s.corStatus.reconhecido : s.corStatus.novo
-            }`}
-          >
-            {ev.acknowledged ? (
-              <Check size={13} strokeWidth={1.7} aria-hidden="true" />
-            ) : (
-              <Circle size={13} strokeWidth={1.7} aria-hidden="true" />
-            )}
-            {ev.acknowledged ? 'Reconhecido' : 'Novo'}
-          </span>
+          {(() => {
+            const st = statusDoFluxo(ev)
+            const IconeSt = ICONE_STATUS[st]
+            return (
+              <span
+                className={`${s.selo} ${s.corStatus[st]}`}
+                title={EXPLICACAO_STATUS[st]}
+              >
+                <IconeSt size={13} strokeWidth={1.7} aria-hidden="true" />
+                {ROTULO_STATUS[st]}
+              </span>
+            )
+          })()}
         </td>
 
         {/* VEREDITO — coluna e paleta próprias. O SELO aparece
@@ -722,51 +806,65 @@ export function Eventos() {
             <IconeVer size={13} strokeWidth={1.7} aria-hidden="true" />
             {ROTULO_VEREDITO[veredito]}
           </span>
-          {/* MOTIVO do veredito: o que separa "estava de máscara"
-              de "a caixa pegou a luva do outro". */}
-          {ev.verification_reason && (
+          {/* MOTIVO do veredito: o que separa "estava de máscara" de "a
+              caixa pegou a luva do outro".
+
+              ⛔ SÓ de gente, e o gate é `veredito !== 'nao-revisado'` (que já
+              exige `verified_by` com prefixo `user:`). `verification_reason`
+              é coluna COMPARTILHADA: a task Celery de triagem escreve nela o
+              que aconteceu com ELA, e em falha de infraestrutura isso era
+              texto de erro. Era daí que saía "API key não configurada"
+              impressa embaixo do selo, em centenas de linhas reais da RVB —
+              erro de infraestrutura servido como se fosse a justificativa de
+              alguém (reportado pelo dono em 09/09/2026).
+
+              A raiz foi fechada no backend (`tasks/verification.py` grava
+              NULL em falha), mas as linhas JÁ gravadas continuam no banco: é
+              este gate que as tira da tela sem migration de UPDATE. E ele
+              vale para a FAMÍLIA inteira ("Erro IA: …", "Erro ao parsear
+              resposta IA"), não só para a frase que o dono viu — o campo diz
+              "justificativa que a PESSOA deu ao julgar", e só isso passa.
+
+              A ficha da fila de verificação (`Verificacao.tsx`) mostra o
+              mesmo campo sob o rótulo "Motivo da IA" — lá está NOMEADO como
+              da máquina, e por isso não é mentira; fica como está. */}
+          {veredito !== 'nao-revisado' && ev.verification_reason && (
             <span className={s.motivo} title={labelForVerificationReason(ev.verification_reason)}>
               {labelForVerificationReason(ev.verification_reason)}
             </span>
           )}
-          {/* ASSIMETRIA DELIBERADA — não "conserte" devolvendo o botão de
-              rejeitar aqui.
+          {/* JULGAR NÃO ACONTECE NA LINHA — nenhum dos dois sentidos.
 
-              CONFIRMAR sem abrir é barato e reversível no sentido certo: a
-              linha JÁ mostra câmera, classe, horário e polaridade; concordar
-              com o que o detector afirmou não acrescenta afirmação nenhuma ao
-              acervo. REJEITAR é o contrário — é dizer "a máquina errou", e
-              esse veredito vira dado de treino: é dele que sai a recalibração.
-              Rejeitar sem ter olhado o frame envenena o acervo com ruído que
-              ninguém consegue auditar depois, e o `reject` sem `reason` é
-              justamente o que não se consegue reler ("errou por quê?").
+              HISTÓRICO, porque a regra andou em UMA direção e não convém
+              desandar: antes havia aqui DOIS botões, "Procedente" e "Falso
+              positivo", ambos mandando veredito com um clique seco. O de
+              REJEITAR saiu primeiro (assimetria deliberada): rejeitar é dizer
+              "a máquina errou", vira dado de treino, e sem motivo estruturado
+              não se consegue reler depois ("errou por quê?"). Confirmar
+              ficou, com o argumento de que concordar com o detector não
+              acrescenta afirmação nova ao acervo.
 
-              Antes existia aqui um botão "Falso positivo" que mandava veredito
-              SEM motivo, enquanto a evidência exige motivo estruturado. Isso
-              fazia da regra do motivo um pedágio contornável a um clique de
-              distância — e quem está com pressa usa o atalho, sempre. Então o
-              atalho deixou de existir: quem rejeita passa pela evidência.
+              O argumento não se sustentou no uso real. Decisão do dono
+              (09/09/2026, com a tela em operação e centenas de eventos por
+              dia): "procede e não procede tem que sair dali, só deve aparecer
+              de quem evidencia a foto". CONFIRMAR TAMBÉM É AFIRMAÇÃO —
+              `approve` carimba `verified_by='user:<id>'` e entra no acervo
+              como julgamento de gente, exatamente com o mesmo peso do outro.
+              E a linha não mostra o frame: mostra câmera, classe e horário.
+              Concordar sem ver a foto é afirmar sobre o que não se olhou —
+              ainda mais num acervo em que 15% dos alertas são cena SEM
+              NINGUÉM, coisa que só o frame revela.
 
-              O link abaixo é a SAÍDA — some o controle, não o caminho. */}
-          {veredito === 'nao-revisado' && podeJulgar && (
-            <span className={s.grupoBotoes}>
-              <button
-                className={s.botao}
-                disabled={ocupado === ev.id}
-                onClick={() => void julgar(ev.id, 'approve')}
-              >
-                Procedente
-              </button>
-              <NavLink
-                className={s.botao}
-                to={rotaNova(`/epi/eventos/${ev.id}`)}
-                aria-label="Abrir a evidência para marcar falso positivo"
-                title="Falso positivo se decide olhando o frame — e o motivo vai junto. Abre a evidência deste evento."
-              >
-                Falso positivo? →
-              </NavLink>
-            </span>
-          )}
+              A assimetria virou simetria: os DOIS vereditos passam pela
+              evidência. O caminho continua a um clique — "Ver evidência"
+              abre a gaveta na própria lista (com a foto, a lupa e os dois
+              botões), "Abrir →" leva à tela inteira. Sumiu o CONTROLE, não o
+              caminho: nenhum veredito ficou inalcançável, só deixou de ser
+              dado às cegas.
+
+              ⛔ Não devolva botão de veredito a esta célula "para agilizar".
+              Se agilizar for o pedido, o lugar é a gaveta (que já avança
+              sozinha para o próximo depois de cada decisão). */}
         </td>
 
         {/* Confiança da detecção (§9 paridade) — o dado já vinha,
@@ -781,7 +879,11 @@ export function Eventos() {
         </td>
 
         <td className={s.celulaAcoes}>
-          {!ev.acknowledged && (
+          {/* "Reconhecer" é dar CIÊNCIA. Quem julgou já fez mais do que isso —
+              abriu a evidência, olhou o frame e decidiu. Oferecer ciência
+              depois do veredito é trabalho que não muda nada na tela (o
+              STATUS já diz "Avaliado") e convida ao clique inútil. */}
+          {podeReconhecer(ev) && (
             <button
               className={s.botao}
               disabled={ocupado === ev.id}

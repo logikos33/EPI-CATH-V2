@@ -995,7 +995,11 @@ export function Dashboard() {
           />
         ) : (
           <>
-            <div className={s.barras} role="group" aria-label={`Eventos por hora, ${faixaTurno}`}>
+            <div
+              className={s.barrasRolagem}
+              role="group"
+              aria-label={`Eventos por hora, ${faixaTurno}`}
+            >
               {pontos.map((p) => {
                 const nivel: Severidade =
                   p.count === 0
@@ -1388,9 +1392,18 @@ export function Dashboard() {
                   coluna "Aguardando"), EVENTOS na legenda (é o que a lista de
                   `/epi/eventos` conta). As duas unidades aparecem porque as
                   duas telas de destino usam uma cada — esconder uma delas é
-                  reabrir a divergência por outro caminho. */}
+                  reabrir a divergência por outro caminho.
+
+                  ⚠️ E a legenda tem de dizer QUAL é qual. Ela dizia só "1.096
+                  evento(s)" embaixo de um 735 sem unidade nenhuma: dois
+                  números diferentes para o que parece a mesma coisa, e nada na
+                  tela ligando um ao outro — quem lê desconfia do cartão ou
+                  escolhe um dos dois no chute. As DUAS unidades passam a sair
+                  nomeadas, na mesma ordem e com as mesmas palavras do contador
+                  de `/epi/eventos` ("N SITUAÇÕES · M EVENTOS"), que é a tela
+                  para onde o número grande leva. */}
               {situacoesAguardando !== eventosAguardando
-                ? `${numero(eventosAguardando)} evento(s) · violação sem reconhecimento · ${JANELA_TRATATIVA_DIAS}d`
+                ? `${numero(situacoesAguardando)} situações · ${numero(eventosAguardando)} eventos · violação sem reconhecimento · ${JANELA_TRATATIVA_DIAS}d`
                 : `violação sem reconhecimento · últimos ${JANELA_TRATATIVA_DIAS} dias`}
             </span>
             {can('alerts:read') && (
@@ -1403,7 +1416,16 @@ export function Dashboard() {
 
         {/* Câmeras ativas — não existe telemetria de conectividade por câmera
             (ver cabeçalho, item 4): "online" prometeria um dado que o
-            sistema não mede. O que existe é status de cadastro. */}
+            sistema não mede. O que existe é status de cadastro.
+
+            ⚠️ E o status de cadastro é DO MÓDULO, não do tenant:
+            `count_by_status` (camera_repository.py) filtra por
+            `escopo_camera_sql(module_code='epi')`. Medido no DEV (RVB,
+            09/09): 18 câmeras ativas no tenant, 17 delas atribuídas ao EPI —
+            "Espaço de convivência" (canal 10) está ativa e NÃO é câmera de
+            EPI. O 17 é o número certo para esta tela; o que faltava era o
+            cartão dizer sobre qual conjunto ele fala, porque "Cadastradas e
+            ativas" sozinho não fecha com a lista de câmeras do tenant. */}
         <section
           className={`${s.cartaoKpi} ${camerasAtivas > 0 ? s.acento.ok : s.acento.atencao}`}
           aria-label="Câmeras ativas"
@@ -1412,7 +1434,9 @@ export function Dashboard() {
           <span className={s.kpiValor}>{numero(camerasAtivas)}</span>
           <Estado
             nivel={camerasAtivas > 0 ? 'ok' : 'atencao'}
-            palavra={camerasAtivas > 0 ? 'Cadastradas e ativas' : 'Nenhuma câmera ativa'}
+            palavra={
+              camerasAtivas > 0 ? 'Atribuídas ao EPI e ativas' : 'Nenhuma câmera ativa no EPI'
+            }
           />
           <span className={s.legenda}>sem telemetria de conectividade por câmera ainda</span>
           {can('cameras:read') && (

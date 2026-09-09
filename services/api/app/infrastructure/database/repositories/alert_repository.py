@@ -18,6 +18,27 @@ class AlertRepository(BaseRepository):
     # Única unidade de bbox que o domínio grava (domain/detectors/base.py).
     BBOX_PIXELS = "pixels_xywh_frame_original"
 
+    #: "Uma PESSOA já julgou este alerta?" — MESMA regra de `vereditoHumano`
+    #: no front (`components/shared/VereditoHumano.tsx`): não basta ter
+    #: `verification_verdict`, porque a task Celery de triagem grava o MESMO
+    #: 'approve'/'reject' com `verified_by='claude-haiku'`. A prova de gente é
+    #: o prefixo `user:` que `VerificationService.human_review` carimba.
+    #:
+    #: Serve à ORDENAÇÃO da fila (`list_with_filters`): julgado vai para o FIM.
+    #: Precisa ser feito AQUI, junto do `LIMIT/OFFSET` — reordenar a página já
+    #: carregada no cliente dá ordem errada na segunda página (o servidor
+    #: escolheu QUAIS 20 linhas mandar antes de o cliente opinar).
+    #:
+    #: `COALESCE(..., false)` não é enfeite: `verified_by` NULL faz o LIKE
+    #: devolver NULL, e `ORDER BY ... ASC` põe NULL POR ÚLTIMO no Postgres —
+    #: sem o COALESCE, o alerta que ninguém tocou (o mais urgente) afundaria
+    #: junto com os já julgados, que é o oposto do pedido. `%%` porque a query
+    #: passa por `cur.execute(sql, params)`: `%` solto vira placeholder.
+    _JULGADO_POR_HUMANO_SQL = (
+        "COALESCE(a.verified_by LIKE 'user:%%' "
+        "AND a.verification_verdict IN ('approve', 'reject'), false)"
+    )
+
     @staticmethod
     def ultima_correcao(hist: Optional[list]) -> Optional[dict]:
         """Última entrada do ledger `violations_historico`, só `por`/`por_nome`/`em`.
@@ -510,6 +531,18 @@ class AlertRepository(BaseRepository):
         data que ela própria imprime), com `a.id` de desempate: `ORDER BY`
         não-determinístico + OFFSET pula linha entre páginas.
 
+        ORDEM DA FILA (pedido do dono, set/2026): o que uma PESSOA já julgou
+        vai para o FIM — `_JULGADO_POR_HUMANO_SQL ASC` ANTES do eixo de tempo.
+        Dentro de cada grupo a cronologia não se perde: o mais recente
+        continua primeiro. Assim quem opera acha o não-julgado no topo sem
+        filtrar nada, com centenas de eventos por dia.
+
+        Isto é ordenação de SERVIDOR de propósito, e é a diferença entre
+        consertar e fingir: o `LIMIT/OFFSET` roda DEPOIS do `ORDER BY`, então
+        é aqui que se decide QUAIS 20 linhas a página 1 traz. Reordenar no
+        cliente só embaralha as 20 que o servidor já escolheu — a partir da
+        página 2 o operador voltaria a receber julgado primeiro.
+
         `module_code` aplica o MESMO par de predicados de `/v1/events/*`
         (`_event_filters`): a coluna `alerts.module_code` E o ESCOPO DE CÂMERA
         (`escopo_sql`). Sem os dois, cartão e lista contam conjuntos
@@ -632,7 +665,7 @@ class AlertRepository(BaseRepository):
             FROM alerts a
             LEFT JOIN cameras i ON a.camera_id = i.id
             WHERE {where}
-            ORDER BY a.{col} DESC, a.id DESC
+            ORDER BY {self._JULGADO_POR_HUMANO_SQL} ASC, a.{col} DESC, a.id DESC
             LIMIT %s OFFSET %s""",
             tuple(page_params),
         )

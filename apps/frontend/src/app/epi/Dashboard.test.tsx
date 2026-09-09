@@ -22,6 +22,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { Dashboard, scoreImpresso } from './Dashboard'
+import * as estilos from './Dashboard.css'
 import { Eventos } from './Eventos'
 import { agruparPorRajada } from '../../utils/rajadas'
 
@@ -338,7 +339,7 @@ describe('EPI Dashboard — câmeras não fingem telemetria que não existe (D1)
     // o "/3" fica fora do match e passaria despercebido. .textContent pega
     // a árvore inteira — é o que de fato trava a fração fora da tela.
     expect(valor.textContent).toBe('2')
-    expect(within(cartao).getByText('Cadastradas e ativas')).toBeTruthy()
+    expect(within(cartao).getByText('Atribuídas ao EPI e ativas')).toBeTruthy()
     expect(within(cartao).queryByText(/online/i)).toBeNull()
     expect(within(cartao).queryByText(/fora do ar/i)).toBeNull()
   })
@@ -349,7 +350,7 @@ describe('EPI Dashboard — câmeras não fingem telemetria que não existe (D1)
     const cartao = await screen.findByLabelText('Câmeras ativas')
     const valor = within(cartao).getByText('0')
     expect(valor.textContent).toBe('0')
-    expect(within(cartao).getByText('Nenhuma câmera ativa')).toBeTruthy()
+    expect(within(cartao).getByText('Nenhuma câmera ativa no EPI')).toBeTruthy()
   })
 })
 
@@ -606,6 +607,54 @@ describe('EPI Dashboard — painéis', () => {
 })
 
 /**
+ * O bloco que impede a GRADE de empurrar painel para fora da tela.
+ *
+ * ⚠️ Assumido de propósito: **jsdom não faz layout**. Nenhum teste daqui mede
+ * pixel, e nenhum deles teria pego o corte se a causa fosse outra. O que estes
+ * dois travam é exatamente a causa medida no navegador (DEV, RVB, 1440px):
+ * track `1fr` = `minmax(auto, 1fr)` cresce até o min-content do painel que
+ * cair nela, e o painel de barras horárias não tinha para onde encolher. A
+ * prova de que a tela ficou inteira é a captura antes/depois no PR — isto
+ * aqui é a cerca para não voltar.
+ */
+describe('EPI Dashboard — a grade não estoura a viewport', () => {
+  it('nenhuma track da folha de estilo é `fr` solto: min-content de painel não vira largura de coluna', async () => {
+    // Lido do disco pela raiz do Vitest: sob jsdom o `import.meta.url` é http
+    // (não file), e `?raw` cai no plugin do vanilla-extract, que devolve o
+    // módulo compilado em vez do texto.
+    const { readFileSync } = await import('node:fs')
+    const folha = readFileSync('src/app/epi/Dashboard.css.ts', 'utf-8')
+    const declaracoes = [...folha.matchAll(/gridTemplateColumns:\s*'([^']+)'/g)].map((m) => m[1])
+    // Sanidade: se a folha parar de declarar grade, o teste vira decoração.
+    expect(declaracoes.length).toBeGreaterThanOrEqual(3)
+    for (const valor of declaracoes) {
+      // Toda track que usa `fr` tem de vir de um `minmax(0, …)`. Sobrou `fr`
+      // depois de tirar os `minmax(0, …)` = existe track com piso automático.
+      const sobra = valor.replace(/minmax\(\s*0\s*,[^)]*\)/g, '')
+      expect(sobra).not.toMatch(/fr\b/)
+    }
+  })
+
+  it('o painel de barras horárias rola dentro do cartão — não empurra a coluna vizinha', async () => {
+    const inicioHora = new Date()
+    inicioHora.setUTCMinutes(0, 0, 0)
+    getTimeline.mockResolvedValue({
+      bucket: 'hour',
+      timeline: [{ bucket: inicioHora.toISOString(), count: 4 }],
+    })
+    montar()
+    const barras = await screen.findByLabelText(/^Eventos por hora,/)
+    // 24 rótulos de hora que não encolhem: sem container de rolagem o
+    // min-content do painel (565px medidos) vira o piso da track.
+    // `style([barras, …])` devolve as DUAS classes; todas têm de estar no
+    // elemento, senão a composição foi trocada por `barras` puro.
+    for (const classe of estilos.barrasRolagem.split(' ')) {
+      expect(barras.className.split(' ')).toContain(classe)
+    }
+  })
+})
+
+/**
  * O bloco que impede o painel de mentir. Cada widget novo tem DOIS casos: um
  * com dado (mostra o número que veio do banco) e um SEM dado (diz que não há,
  * em vez de desenhar barra de enfeite ou escrever zero como se fosse medição).
@@ -704,7 +753,9 @@ describe('EPI Dashboard — perfil temporal (violações por horário, volume po
     // A legenda declara a outra unidade e o recorte inteiro — o número grande
     // conta situações (como `/epi/acoes`), a legenda conta eventos (como a
     // lista de `/epi/eventos`).
-    expect(within(cartao).getByText(/4 evento\(s\) · violação sem reconhecimento · 30d/)).toBeTruthy()
+    expect(
+      within(cartao).getByText(/3 situações · 4 eventos · violação sem reconhecimento · 30d/),
+    ).toBeTruthy()
     // ⛔ o número do perfil (396 sem reconhecimento de 423) não pode reaparecer.
     expect(within(cartao).queryByText('396')).toBeNull()
   })
@@ -798,7 +849,7 @@ describe('EPI Dashboard — o link carrega o filtro que produziu o número', () 
     await waitFor(() => expect(within(cartao).getByText('3')).toBeTruthy())
     const doCartao = Number(cartao.querySelector('a')?.textContent?.replace(/\D/g, ''))
     const eventosDoCartao = Number(
-      (within(cartao).getByText(/evento\(s\)/).textContent ?? '').match(/^\d+/)?.[0],
+      (within(cartao).getByText(/eventos ·/).textContent ?? '').match(/· ([\d.]+) eventos/)?.[1],
     )
     const href = cartao.querySelector('a')?.getAttribute('href') ?? ''
     dashboard.unmount()
