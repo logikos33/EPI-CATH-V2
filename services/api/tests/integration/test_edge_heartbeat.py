@@ -16,6 +16,8 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import jwt
+from contextlib import ExitStack
+
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -269,6 +271,47 @@ class TestEdgeConfigDivergence:
             "module_code": "epi",
         }
 
+    @staticmethod
+    def _patch_repos(mock_repo, camera_repo, *, op_repo=None, mod_repo=None, dep_repo=None):
+        """Patcha TODOS os repos que `_build_edge_config_payload` consulta.
+
+        Desde que o config/poll passou a mandar rules/scenario/model, o
+        config_version do heartbeat deriva do payload INTEIRO — patchar só o
+        repo de câmeras deixaria os outros três caírem num DatabasePool
+        inexistente e o check viraria "erro best-effort", que é verde falso.
+        """
+        op_repo = op_repo or MagicMock(**{"list_for_site_config.return_value": []})
+        mod_repo = mod_repo or MagicMock(**{"get_by_tenant.return_value": []})
+        dep_repo = dep_repo or MagicMock(**{"list_active_for_site.return_value": []})
+        stack = ExitStack()
+        stack.enter_context(patch("app.api.v1.edge.routes._get_repo", return_value=mock_repo))
+        stack.enter_context(
+            patch("app.api.v1.edge.routes._get_camera_repo", return_value=camera_repo)
+        )
+        stack.enter_context(
+            patch("app.api.v1.edge.routes._get_operation_repo", return_value=op_repo)
+        )
+        stack.enter_context(
+            patch("app.api.v1.edge.routes._get_module_repo", return_value=mod_repo)
+        )
+        stack.enter_context(
+            patch("app.api.v1.edge.routes._get_deployment_repo", return_value=dep_repo)
+        )
+        return stack
+
+    @classmethod
+    def _versao_corrente(cls, mock_repo, cameras) -> str:
+        """config_version que a nuvem calcularia para estas câmeras — via o
+        MESMO builder da rota, não reconstruindo o payload no teste."""
+        import app.api.v1.edge.routes as edge_routes
+
+        camera_repo = MagicMock()
+        camera_repo.list_for_site_config.return_value = cameras
+        with cls._patch_repos(mock_repo, camera_repo):
+            return edge_routes._compute_config_version(
+                edge_routes._build_edge_config_payload("site", "tenant")
+            )
+
     def test_no_config_version_applied_never_touches_camera_repo(
         self, client, device_setup, mock_repo
     ) -> None:
@@ -277,9 +320,7 @@ class TestEdgeConfigDivergence:
         token = _make_token(private_pem, tenant_id, site_id, device_id)
         camera_repo = MagicMock()
 
-        with patch("app.api.v1.edge.routes._get_repo", return_value=mock_repo), patch(
-            "app.api.v1.edge.routes._get_camera_repo", return_value=camera_repo
-        ):
+        with self._patch_repos(mock_repo, camera_repo):
             res = client.post(
                 "/api/v1/edge/heartbeat",
                 json=VALID_PAYLOAD,  # sem config_version_applied
@@ -292,20 +333,17 @@ class TestEdgeConfigDivergence:
     def test_matching_config_version_logs_nothing(
         self, client, device_setup, mock_repo, caplog
     ) -> None:
-        import app.api.v1.edge.routes as edge_routes
 
         private_pem, _, tenant_id, site_id, device_id = device_setup
         token = _make_token(private_pem, tenant_id, site_id, device_id)
         cameras = [self._camera_row()]
-        current = edge_routes._compute_config_version(cameras)
+        current = self._versao_corrente(mock_repo, cameras)
 
         camera_repo = MagicMock()
         camera_repo.list_for_site_config.return_value = cameras
         payload = {**VALID_PAYLOAD, "config_version_applied": current}
 
-        with patch("app.api.v1.edge.routes._get_repo", return_value=mock_repo), patch(
-            "app.api.v1.edge.routes._get_camera_repo", return_value=camera_repo
-        ), caplog.at_level("WARNING"):
+        with self._patch_repos(mock_repo, camera_repo), caplog.at_level("WARNING"):
             res = client.post(
                 "/api/v1/edge/heartbeat",
                 json=payload,
@@ -328,9 +366,7 @@ class TestEdgeConfigDivergence:
         camera_repo.list_for_site_config.return_value = [self._camera_row(), self._camera_row(2)]
         payload = {**VALID_PAYLOAD, "config_version_applied": "stale-outdated-hash"}
 
-        with patch("app.api.v1.edge.routes._get_repo", return_value=mock_repo), patch(
-            "app.api.v1.edge.routes._get_camera_repo", return_value=camera_repo
-        ), caplog.at_level("WARNING"):
+        with self._patch_repos(mock_repo, camera_repo), caplog.at_level("WARNING"):
             res = client.post(
                 "/api/v1/edge/heartbeat",
                 json=payload,
@@ -353,9 +389,7 @@ class TestEdgeConfigDivergence:
         camera_repo.list_for_site_config.side_effect = RuntimeError("db down")
         payload = {**VALID_PAYLOAD, "config_version_applied": "some-hash"}
 
-        with patch("app.api.v1.edge.routes._get_repo", return_value=mock_repo), patch(
-            "app.api.v1.edge.routes._get_camera_repo", return_value=camera_repo
-        ):
+        with self._patch_repos(mock_repo, camera_repo):
             res = client.post(
                 "/api/v1/edge/heartbeat",
                 json=payload,
@@ -377,9 +411,7 @@ class TestEdgeConfigDivergence:
         camera_repo = MagicMock()
         camera_repo.list_for_site_config.return_value = cameras
         payload = {**VALID_PAYLOAD, "config_version_applied": applied}
-        with patch("app.api.v1.edge.routes._get_repo", return_value=mock_repo), patch(
-            "app.api.v1.edge.routes._get_camera_repo", return_value=camera_repo
-        ):
+        with self._patch_repos(mock_repo, camera_repo):
             res = client.post(
                 "/api/v1/edge/heartbeat",
                 json=payload,
@@ -426,10 +458,9 @@ class TestEdgeConfigDivergence:
     ) -> None:
         """(3) da definição de pronto — a linha que impede a supressão de virar
         esquecimento: quem lê o log sabe que houve silêncio e de que tamanho."""
-        import app.api.v1.edge.routes as edge_routes
 
         cameras = [self._camera_row(), self._camera_row(2)]
-        atual = edge_routes._compute_config_version(cameras)
+        atual = self._versao_corrente(mock_repo, cameras)
 
         with caplog.at_level("WARNING"):
             self._bate_heartbeat(client, device_setup, mock_repo, cameras, "stale-a")
@@ -446,10 +477,9 @@ class TestEdgeConfigDivergence:
     ) -> None:
         """Config em dia desde sempre não pode gerar linha de 'resolvida' —
         seria ruído novo no lugar do que a issue veio remover."""
-        import app.api.v1.edge.routes as edge_routes
 
         cameras = [self._camera_row()]
-        atual = edge_routes._compute_config_version(cameras)
+        atual = self._versao_corrente(mock_repo, cameras)
 
         with caplog.at_level("WARNING"):
             self._bate_heartbeat(client, device_setup, mock_repo, cameras, atual)

@@ -377,3 +377,59 @@ class TestModuleScope:
 
         assert resp.status_code == 201
         deployment_repo.create.assert_called_once()
+
+
+class TestDigestDoModeloParaOEdge:
+    """Apontar modelo à câmera enfileira o cálculo do SHA-256 do ONNX.
+
+    Sem esse digest o config/poll do edge OMITE o manifesto (não inventa um) —
+    ou seja, sem esta chamada o modelo escolhido no front nunca chegaria ao box.
+    """
+
+    def test_deploy_enfileira_digest_do_modelo(
+        self, client, app, mocked_repos, monkeypatch
+    ):
+        camera_repo, deployment_repo, registry_repo = mocked_repos
+        camera_repo.get_by_id_and_tenant.return_value = _camera_row()
+        registry_repo.get_for_tenant.return_value = _model_row()
+        deployment_repo.create.return_value = _deployment_row()
+        agendar = MagicMock()
+        monkeypatch.setattr(handlers, "_agendar_digest_do_modelo", agendar)
+
+        resp = client.post(
+            f"/api/cameras/{CAMERA_ID}/model-config",
+            json={"model_id": MODEL_ID, "config": _valid_config()},
+            headers=_token(app),
+        )
+
+        assert resp.status_code == 201
+        agendar.assert_called_once_with(MODEL_ID)
+
+    def test_rollback_enfileira_digest_do_modelo(
+        self, client, app, mocked_repos, monkeypatch
+    ):
+        camera_repo, deployment_repo, registry_repo = mocked_repos
+        camera_repo.get_by_id_and_tenant.return_value = _camera_row()
+        deployment_repo.get_by_id.return_value = _deployment_row()
+        deployment_repo.create.return_value = _deployment_row()
+        agendar = MagicMock()
+        monkeypatch.setattr(handlers, "_agendar_digest_do_modelo", agendar)
+
+        resp = client.post(
+            f"/api/cameras/{CAMERA_ID}/model-config/rollback",
+            json={"deployment_id": DEPLOYMENT_ID},
+            headers=_token(app),
+        )
+
+        assert resp.status_code == 201
+        agendar.assert_called_once_with(MODEL_ID)
+
+    def test_broker_fora_do_ar_nao_derruba_o_deploy(self, monkeypatch):
+        """Best-effort como `_notify_model_change`: a fila cair não pode
+        impedir alguém de apontar um modelo a uma câmera."""
+        import app.infrastructure.queue.tasks.model_validation as mv
+        monkeypatch.setattr(
+            mv.record_onnx_digest, "delay",
+            MagicMock(side_effect=RuntimeError("broker off")),
+        )
+        handlers._agendar_digest_do_modelo(MODEL_ID)  # não levanta

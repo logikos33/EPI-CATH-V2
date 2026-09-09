@@ -166,6 +166,7 @@ def make_celery(app: object | None = None) -> Celery:
             "app.infrastructure.queue.tasks.auto_training",
             "app.infrastructure.queue.tasks.nvr_extraction",
             "app.infrastructure.queue.tasks.model_evaluation",
+            "app.infrastructure.queue.tasks.model_validation",
             "app.infrastructure.queue.tasks.model_drift",
             "app.infrastructure.queue.tasks.gpu_reconciler",
             # Módulo de Qualidade Industrial — filas dedicadas e isoladas
