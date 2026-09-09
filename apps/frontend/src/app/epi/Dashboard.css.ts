@@ -109,7 +109,11 @@ export const popoverCheck = style({ accentColor: lk.cor.cianoVisao, cursor: 'poi
 
 export const gridKpi = style({
   display: 'grid',
-  gridTemplateColumns: '360px 1fr 1fr 1fr',
+  // `minmax(0, …)` também aqui, e não só nos breakpoints logo abaixo: o
+  // comentário do `[TELA_ESTREITA]` já explicava por quê ("uma track `1fr`
+  // ainda respeita o min-content dos filhos") e a declaração de desktop era a
+  // única da folha que não seguia a própria regra.
+  gridTemplateColumns: '360px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)',
   gap: '12px',
   '@media': {
     '(max-width: 1180px)': { gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)' },
@@ -270,7 +274,21 @@ export const atalhoInline = style({
 
 export const gridPaineis = style({
   display: 'grid',
-  gridTemplateColumns: '1.4fr 1fr 1fr',
+  // `minmax(0, …)` e não `1.4fr 1fr 1fr` solto — MESMA regra que `gridKpi` já
+  // aplica acima, pelo mesmo motivo. Uma track `1fr` é `minmax(auto, 1fr)`:
+  // ela cresce até o MIN-CONTENT do painel que estiver nela, e a grade inteira
+  // estoura o container. Medido no DEV a 1440px (RVB, 09/09): `Eventos por
+  // hora` tem 565px de min-content (24 rótulos "00h" que não encolhem) e
+  // `Câmeras com mais eventos`, 416px (nome de câmera em `nowrap`) — as tracks
+  // resolviam para `565 · 238 · 416` = 1243px dentro de uma coluna de 1150px,
+  // e a TERCEIRA coluna nascia 93px fora da viewport, cortada pela borda
+  // direita da tela.
+  //
+  // ⚠️ E os painéis são ARRASTÁVEIS: qualquer um pode parar em qualquer
+  // coluna. Consertar só o painel largo de hoje deixaria a próxima
+  // reordenação reabrir o mesmo corte — o piso tem de morrer na TRACK, não no
+  // painel. Cada painel cuida do próprio transbordo (ver `barrasRolagem`).
+  gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr)',
   gap: '12px',
   alignItems: 'start',
   '@media': { '(max-width: 1180px)': { gridTemplateColumns: 'minmax(0, 1fr)' } },
@@ -319,6 +337,24 @@ export const barras = style({
   // soma mais que a tela some — rolagem CONTIDA aqui, nunca na página.
   '@media': { [TELA_ESTREITA]: { overflowX: 'auto' } },
 })
+
+/**
+ * A MESMA barra, quando cada coluna leva rótulo próprio ("Eventos por hora":
+ * 24 colunas, 24 rótulos de hora). Aí o min-content é a soma dos rótulos —
+ * 527px medidos —, e com `minmax(0, 1fr)` na grade o painel deixou de esticar
+ * a coluna: quem tem de ceder é o gráfico.
+ *
+ * Rolagem CONTIDA aqui e não `min-width: 0` na coluna: encolher a coluna abaixo
+ * do rótulo faz "08h" e "09h" se sobreporem, e um eixo de HORA ilegível é pior
+ * que um eixo que rola. É a mesma decisão que `barras` já tomava no telefone —
+ * só que a largura da coluna da grade não é a largura da tela, e media query
+ * nenhuma enxerga isso.
+ *
+ * ⛔ Não promova isto para `barras`: os painéis empilhados usam `rotuloEixo`
+ * com `width: 0` e texto transbordando para os lados, e um container de
+ * rolagem passa a RECORTAR a metade esquerda do primeiro rótulo ("00h").
+ */
+export const barrasRolagem = style([barras, { overflowX: 'auto' }])
 
 export const colunaBarra = style({
   flex: 1,
