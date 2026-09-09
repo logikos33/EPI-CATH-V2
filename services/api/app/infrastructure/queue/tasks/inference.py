@@ -570,6 +570,81 @@ def _queue_verification_if_low_confidence(
         )
 
 
+def _gravar_alerta(
+    camera_id: str,
+    detections: list[dict],
+    evidence_key: "str | None",
+    *,
+    captured_at: "datetime | None" = None,
+    site_id: "str | None" = None,
+    frame_bytes: "bytes | None" = None,
+    frame=None,
+) -> "dict | None":
+    """Cauda comum de TODO alerta nascido de detecção — do `avg_confidence`
+    até o hook de auto-captura. É o escritor único; o que varia acima dele é
+    de onde vem a evidência.
+
+    Dois pontos de ENTRADA chamam isto, e só eles:
+      (a) `_save_alert` — encoda o frame e SOBE a evidência antes (caminho ao
+          vivo e retroativo, comportamento inalterado);
+      (b) `alerta_de_evento_do_edge` — o agente do box já subiu a evidência e
+          manda `evidence_r2_key` no evento; não há frame para subir aqui.
+
+    Um SEGUNDO escritor já existiu (o `socket_bridge`, por SQL cru na thread
+    da API) e DUPLICAVA a mesma detecção em `alerts` — por isso a extração é
+    um helper compartilhado e não um segundo INSERT.
+
+    `frame_bytes`/`frame`: presentes ⇒ roda a auto-captura de frame de treino
+    (WS-B3); ausentes ⇒ não há imagem decodificada para capturar (edge) ou o
+    frame JÁ é uma amostra de treino (retroativo, `skip_auto_capture`).
+
+    ⛔ Não engole exceção: quem chama decide o que fazer com a falha — o
+    caminho ao vivo é best-effort de sempre, o do edge precisa CONTAR a falha
+    na resposta do batch em vez de deixá-la invisível.
+    """
+    from app.infrastructure.database.connection import DatabasePool  # noqa: PLC0415
+    from app.infrastructure.database.repositories.alert_repository import (  # noqa: PLC0415
+        AlertRepository,
+    )
+
+    avg_confidence = (
+        sum(d["confidence"] for d in detections) / len(detections)
+        if detections else 0.0
+    )
+
+    pool = DatabasePool.get_instance()
+    if pool is None:
+        logger.warning("alert_db_skip: DatabasePool not initialized")
+        return None
+
+    tenant_id, module_code = _camera_tenant_module(pool, camera_id)
+
+    alert_row = AlertRepository(pool).create(
+        camera_id=UUID(camera_id),
+        violations=detections,
+        confidence=round(avg_confidence, 3),
+        evidence_key=evidence_key,
+        tenant_id=tenant_id,
+        module_code=module_code,
+        timestamp=captured_at,
+        site_id=site_id,
+    )
+    logger.info(
+        "alert_saved: camera=%s evidence=%s violations=%d retroativo=%s site=%s",
+        camera_id, evidence_key, len(detections), captured_at is not None, site_id,
+    )
+
+    _queue_verification_if_low_confidence(
+        alert_row, camera_id, detections, module_code
+    )
+
+    if frame_bytes is not None:
+        _auto_capture_frame(
+            camera_id, tenant_id, module_code, frame_bytes, frame, avg_confidence, pool,
+        )
+    return alert_row
+
+
 def _save_alert(
     camera_id: str,
     detections: list[dict],
@@ -580,16 +655,17 @@ def _save_alert(
 ) -> "dict | None":
     """Salva alerta: frame no storage + registro no banco (tenant-scoped).
 
-    ÚNICO ponto do sistema que grava alerta a partir de uma detecção — ao vivo
-    (#132) ou retroativa (`retroactive_inference`, abaixo). Até agosto/2026 o
-    `socket_bridge` também inseria, por SQL cru, na thread da API — a mesma
-    detecção virava duas linhas em `alerts` sempre que a confiança ficava
-    abaixo do limiar de verificação. Aquele caminho foi removido e o disparo
-    de `verify_alert`, que só ele fazia, mudou para cá.
+    Um dos dois pontos de entrada do escritor único (`_gravar_alerta`) — este
+    é o do frame EM MEMÓRIA: ao vivo (#132) ou retroativo
+    (`retroactive_inference`, abaixo). Até agosto/2026 o `socket_bridge`
+    também inseria, por SQL cru, na thread da API — a mesma detecção virava
+    duas linhas em `alerts` sempre que a confiança ficava abaixo do limiar de
+    verificação. Aquele caminho foi removido e o disparo de `verify_alert`,
+    que só ele fazia, mudou para cá.
 
-    Por ser o escritor único, é também o único lugar correto pro hook de
-    auto-captura de frame de treino (WS-B3): duplicar o hook em outro caminho
-    duplicaria o frame e a reserva do teto diário.
+    O hook de auto-captura de frame de treino (WS-B3) mora no helper, não
+    aqui: duplicá-lo em outro caminho duplicaria o frame e a reserva do teto
+    diário.
 
     `captured_at`: hora REAL da captura do frame de origem — vai para
     `alerts.timestamp` em vez do DEFAULT NOW() do caminho ao vivo. É o par
@@ -610,10 +686,6 @@ def _save_alert(
     try:
         import cv2  # noqa: PLC0415
 
-        from app.infrastructure.database.connection import DatabasePool  # noqa: PLC0415
-        from app.infrastructure.database.repositories.alert_repository import (  # noqa: PLC0415
-            AlertRepository,
-        )
         from app.infrastructure.storage.local_storage import get_storage  # noqa: PLC0415
 
         timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
@@ -628,44 +700,175 @@ def _save_alert(
         storage = get_storage()
         storage.upload_bytes(evidence_key, frame_bytes, "image/jpeg")
 
-        avg_confidence = (
-            sum(d["confidence"] for d in detections) / len(detections)
-            if detections else 0.0
+        return _gravar_alerta(
+            camera_id,
+            detections,
+            evidence_key,
+            captured_at=captured_at,
+            # `skip_auto_capture` vira "não passe o frame adiante" — o helper
+            # só captura o que recebe.
+            frame_bytes=None if skip_auto_capture else frame_bytes,
+            frame=None if skip_auto_capture else frame,
         )
-
-        pool = DatabasePool.get_instance()
-        if pool is None:
-            logger.warning("alert_db_skip: DatabasePool not initialized")
-            return None
-
-        tenant_id, module_code = _camera_tenant_module(pool, camera_id)
-
-        alert_row = AlertRepository(pool).create(
-            camera_id=UUID(camera_id),
-            violations=detections,
-            confidence=round(avg_confidence, 3),
-            evidence_key=evidence_key,
-            tenant_id=tenant_id,
-            module_code=module_code,
-            timestamp=captured_at,
-        )
-        logger.info(
-            "alert_saved: camera=%s evidence=%s violations=%d retroativo=%s",
-            camera_id, evidence_key, len(detections), captured_at is not None,
-        )
-
-        _queue_verification_if_low_confidence(
-            alert_row, camera_id, detections, module_code
-        )
-
-        if not skip_auto_capture:
-            _auto_capture_frame(
-                camera_id, tenant_id, module_code, frame_bytes, frame, avg_confidence, pool,
-            )
-        return alert_row
     except Exception as exc:
         logger.error("alert_save_failed: camera=%s error=%s", camera_id, exc, exc_info=True)
         return None
+
+
+def _instante_de_captura(payload: dict, occurred_at: "str | None") -> "datetime":
+    """Hora REAL da detecção no box: `payload.timestamp` > `occurred_at`.
+
+    É a chave natural de idempotência (`exists_at_capture`) e o que faz
+    `ProcedenciaBadge` no front distinguir edge de coleta retroativa. Sem ela
+    um reenvio do mesmo lote criaria alerta de novo — por isso a ausência é
+    ERRO, não um `now()` silencioso que quebraria a dedup.
+
+    Devolve UTC INGÊNUO: `alerts.timestamp` é `TIMESTAMP` sem fuso (migration
+    004) e todo o resto do sistema grava ali `datetime.utcnow()`. Entregar um
+    datetime com fuso deixaria o deslocamento por conta do `TimeZone` da
+    sessão do Postgres — dois relógios diferentes na mesma coluna.
+    """
+    from datetime import timezone  # noqa: PLC0415
+
+    for bruto in (payload.get("timestamp"), occurred_at):
+        if not bruto:
+            continue
+        try:
+            quando = datetime.fromisoformat(str(bruto).replace("Z", "+00:00"))
+        except ValueError:
+            logger.warning("edge_alert_timestamp_invalido: valor=%r", bruto)
+            continue
+        if quando.tzinfo is not None:
+            quando = quando.astimezone(timezone.utc).replace(tzinfo=None)
+        return quando
+    raise ValueError(
+        "evento de detecção sem instante de captura utilizável "
+        "(payload.timestamp/occurred_at) — sem ele não há idempotência"
+    )
+
+
+def alerta_de_evento_do_edge(
+    tenant_id: str,
+    site_id: "str | None",
+    camera_id: "str | None",
+    payload: dict,
+    *,
+    evidence_r2_key: "str | None" = None,
+    occurred_at: "str | None" = None,
+) -> bool:
+    """Evento `detection` vindo do box → linha em `alerts`, pelos MESMOS portões.
+
+    O segundo ponto de entrada do escritor único (`_gravar_alerta`). Fecha o
+    buraco medido: `POST /api/v1/edge/events/ingest` gravava só em
+    `public.edge_events`, tabela que NENHUM leitor do produto consulta — a
+    tela do operador lê `public.alerts`. Tudo que o edge mandava morria ali.
+
+    Não sobe evidência: o agente já subiu o clipe/frame e manda a chave R2 no
+    evento (ADR-0028, cloud-first). Também não roda detector — a inferência
+    aconteceu no box; o que a nuvem faz aqui é aplicar os portões DELA:
+      · escopo de classes da câmera (#519) — `_filtrar_por_escopo` com o
+        escopo do deployment ativo, porque o cache do detector não existe no
+        processo da API;
+      · limiar servido `DETECTION_CONFIDENCE_THRESHOLD` — o box tem o dele,
+        o que vale na nuvem é este;
+      · polaridade decidida (`_has_violation` → `yolo_classes.is_violation`,
+        ADR-0065) — só vira alerta o que o catálogo do tenant declara violação;
+      · idempotência por (câmera, instante de captura), a mesma da inferência
+        retroativa — reenvio do lote não duplica.
+
+    ⛔ NÃO aplica `_persistencia_satisfeita` (ADR-0067) pelo mesmo motivo da
+    retroativa: o que chega aqui são eventos ESPAÇADOS já filtrados no box
+    (`DetectionRelay` só enfileira frame com violação), não uma sequência
+    contínua para a janela contar.
+
+    Retorna True se nasceu alerta e False se um portão barrou. LEVANTA em
+    falha (câmera desconhecida/de outro tenant, sem instante de captura, erro
+    de banco) — quem chama conta e loga, porque "nenhum alerta" nunca pode
+    ser indistinguível de "rodou e não achou nada".
+    """
+    from app.infrastructure.database.connection import DatabasePool  # noqa: PLC0415
+    from app.infrastructure.database.repositories.alert_repository import (  # noqa: PLC0415
+        AlertRepository,
+    )
+    from app.infrastructure.database.repositories.camera_repository import (  # noqa: PLC0415
+        CameraRepository,
+    )
+    from app.infrastructure.database.repositories.model_deployment_repository import (  # noqa: PLC0415
+        ModelDeploymentRepository,
+    )
+
+    pool = DatabasePool.get_instance()
+    if pool is None:
+        raise RuntimeError("edge_alert: DatabasePool não inicializado")
+
+    try:
+        camera_uuid = UUID(str(camera_id))
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"camera_id do evento não é UUID: {camera_id!r}") from exc
+
+    # C-01: a câmera tem de ser DO TENANT do device token. O caminho ao vivo
+    # usa `get_by_id` (busca global) porque lá o id vem do próprio worker;
+    # aqui ele vem de FORA, e um box comprometido carimbaria alerta na câmera
+    # do vizinho. Cross-tenant não existe: some, não dá 403.
+    camera = CameraRepository(pool).get_by_id_and_tenant(str(camera_uuid), str(tenant_id))
+    if not camera:
+        raise ValueError(
+            f"câmera {camera_id} não pertence ao tenant do device — evento descartado"
+        )
+
+    detections = payload.get("detections") or []
+    if not isinstance(detections, list):
+        raise ValueError("payload.detections não é uma lista")
+
+    captured_at = _instante_de_captura(payload, occurred_at)
+
+    alert_repo = AlertRepository(pool)
+    if alert_repo.exists_at_capture(camera_uuid, captured_at):
+        logger.info(
+            "edge_alert_ja_existe: camera=%s captura=%s", camera_id, captured_at
+        )
+        return False
+
+    module_code = str(
+        camera.get("active_module") or camera.get("module_code") or "epi"
+    ).strip()
+
+    dentro_do_limiar = [
+        d for d in detections
+        if isinstance(d, dict) and float(d.get("confidence") or 0.0) >= _DETECTION_CONFIDENCE
+    ]
+    for det in dentro_do_limiar:
+        det.setdefault("bbox_unidade", _BBOX_UNIDADE)
+
+    escopo = _escopo_do_deployment(
+        ModelDeploymentRepository(pool).get_active_for_camera(
+            str(tenant_id), camera_uuid, module_code
+        )
+    )
+    no_escopo = _filtrar_por_escopo(str(camera_id), dentro_do_limiar, escopo)
+
+    if not _has_violation(str(camera_id), no_escopo):
+        logger.debug(
+            "edge_alert_sem_violacao: camera=%s recebidas=%d apos_portoes=%d",
+            camera_id, len(detections), len(no_escopo),
+        )
+        return False
+
+    alerta = _gravar_alerta(
+        str(camera_id),
+        no_escopo,
+        evidence_r2_key,
+        captured_at=captured_at,
+        site_id=str(site_id) if site_id else None,
+    )
+    if alerta is None:
+        raise RuntimeError(f"gravação do alerta não devolveu linha (camera={camera_id})")
+    if not evidence_r2_key:
+        # O alerta aparece na tela sem imagem. Preferível a não aparecer —
+        # mas é sintoma de agente que não subiu a evidência.
+        logger.warning("edge_alert_sem_evidencia: camera=%s alerta=%s",
+                       camera_id, alerta.get("id"))
+    return True
 
 
 # ── Cache do detector (singleton por processo) ────────────────────────────────
@@ -937,10 +1140,29 @@ def _no_escopo_da_camera(camera_id: str, detections: list[dict]) -> list[dict]:
     recebe classe por câmera, e isso continua aberto no #519.
 
     Sem escopo gravado (None) nada é filtrado.
+
+    O escopo sai do cache `_camera_detectors`, populado por
+    `_get_detector_for_camera` — ou seja, só existe no processo que CARREGOU o
+    modelo (o worker). Quem não carrega detector (o ingest do edge, na API)
+    tem de resolver o escopo do deployment e chamar `_filtrar_por_escopo`
+    direto; usar esta função lá seria um portão que nunca filtra nada.
     """
     with _camera_detector_lock:
         cached = _camera_detectors.get(camera_id)
-    escopo = cached.get("classes") if cached else None
+    return _filtrar_por_escopo(
+        camera_id, detections, cached.get("classes") if cached else None
+    )
+
+
+def _filtrar_por_escopo(
+    camera_id: str, detections: list[dict], escopo: "frozenset[str] | None"
+) -> list[dict]:
+    """Filtro puro: descarta o que não está no `escopo` (None = tudo passa).
+
+    Separado de `_no_escopo_da_camera` só para que a decisão possa ser tomada
+    com um escopo vindo de outra fonte que não o cache do detector — mesma
+    regra, mesmo aviso, um único lugar.
+    """
     if escopo is None:
         return detections
 

@@ -40,7 +40,7 @@ import {
   SlidersHorizontal,
   BookOpen,
 } from 'lucide-react'
-import { ApiError, api } from '../../services/api'
+import { ApiError, api, getToken } from '../../services/api'
 import { precisaDeReabastecimento } from './studioQueue'
 import { useToast } from '../ui/Toast/useToast'
 import { vars } from '../../styles/theme.css'
@@ -376,7 +376,7 @@ export function AnnotationStudio({
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       const dirtyEntries = Object.entries(statesRef.current).filter(([, st]) => st.dirty)
       if (dirtyEntries.length === 0) return
-      const token = localStorage.getItem('token')
+      const token = getToken()
       dirtyEntries.forEach(([frameId, st]) => {
         void fetch(`${apiBase}/api/training/frames/${frameId}/annotations`, {
           method: 'POST',

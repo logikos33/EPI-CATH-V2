@@ -1,0 +1,37 @@
+[Unit]
+# Inferência de PRODUÇÃO por módulo. %i = epi | quality | counting | ...
+#
+# NÃO é `soak-infer-*.service`: aquelas apontam para app_mm_all_prod_*.txt,
+# config do teste de CARGA — 16 fontes em rtsp://127.0.0.1:8554/camN (gerador
+# sintético) e sink type=1 sem nenhuma saída de evento. Acendem a GPU e não
+# entregam nada ao produto. Esta unit roda o config gerado por
+# `gerar_config_deepstream.py`, que aponta para as câmeras REAIS e liga o
+# dump KITTI que o publicador consome.
+#
+# O MODELO É PARÂMETRO: está dentro do config (primary-gie/config-file →
+# engine + labelfile + parser). Quem vencer o duelo entra por regeração do
+# config, sem tocar nesta unit.
+Description=Recognition inferência DeepStream [%i] (câmeras reais)
+After=network-online.target recognition-redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.config/recognition/deepstream
+Environment=USE_NEW_GST_NVSTREAMMUX=yes
+# Cada surface NVMM é um fd dmabuf; ~28 streams estoura o 1024 default
+# (REGRAS_PLATAFORMA_JETSON §3.1). Mesmo valor das units do soak.
+LimitNOFILE=65535
+ExecStart=/usr/bin/deepstream-app -c %h/.config/recognition/deepstream/app_%i.txt
+Restart=always
+RestartSec=8
+
+StandardOutput=append:%h/recognition/logs/infer-%i.log
+StandardError=append:%h/recognition/logs/infer-%i.log
+
+# O pipeline é o ÚLTIMO a morrer: os auxiliares (score positivo) vão antes.
+# Sem MemoryMax de propósito — o budget dos OUTROS é que garante a folga.
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=default.target
