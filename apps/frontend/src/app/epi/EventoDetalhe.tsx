@@ -74,6 +74,11 @@ import { rotaNova } from '../RotasNovas'
 import { LogikosLoader } from '../shell/LogikosLoader'
 import * as s from './EventoDetalhe.css'
 import { useLupa } from './useLupa'
+import {
+  BBOX_FRAME_ORIGINAL,
+  estiloDaCaixa,
+  referenciaDaCaixa,
+} from '../../services/bboxProjecao'
 
 /**
  * Rota da lista NO FRONT NOVO (de-para do DELTA: `/epi/alerts` → `/epi/eventos`).
@@ -89,8 +94,11 @@ const ROTA_EVENTOS = rotaNova('/epi/eventos')
 
 type Bbox = [number, number, number, number]
 
-/** Única unidade de bbox que esta tela sabe projetar (contrato de `domain/detectors/base.py`). */
-export const BBOX_PIXELS = 'pixels_xywh_frame_original'
+/** Unidade das caixas vindas do caminho da NUVEM (`domain/detectors/base.py`).
+ *  Mantida exportada porque outras telas ainda a importam por nome.
+ *  ⚠️ Não é mais a ÚNICA projetável: o edge grava `pixels_xywh_streammux`, e
+ *  quem decide o que dá para desenhar agora é `services/bboxProjecao.ts`. */
+export const BBOX_PIXELS = BBOX_FRAME_ORIGINAL
 
 export interface Violacao {
   class: string
@@ -518,8 +526,15 @@ export function EventoDetalhe() {
   const primeira = classes[0]
   // Só desenha o que sabemos projetar. Unidade ausente/estranha = origem
   // desconhecida: melhor nenhuma caixa que caixa mentirosa.
-  const desenhaveis = classes.filter((v) => v.bbox && v.bbox_unidade === BBOX_PIXELS)
-  const unidadeDesconhecida = classes.filter((v) => v.bbox && v.bbox_unidade !== BBOX_PIXELS)
+  //
+  // Antes isto comparava com UMA unidade só, e o edge — que grava
+  // `pixels_xywh_streammux` — caía inteiro no balde do desconhecido: nenhuma
+  // caixa aparecia em alerta nenhum vindo do box. `referenciaDaCaixa` sabe
+  // projetar as duas, e continua devolvendo null para o que não conhece.
+  const desenhaveis = classes.filter((v) => referenciaDaCaixa(v, { w: 1, h: 1 }) !== null)
+  const unidadeDesconhecida = classes.filter(
+    (v) => v.bbox && referenciaDaCaixa(v, { w: 1, h: 1 }) === null,
+  )
   // Origem DECLARADA manda; o atraso entre captura e gravação (ADR-0066) só
   // fala quando não há declaração nenhuma — indício não vence afirmação.
   const procedencia = procedenciaDeclarada(evento.violations)
@@ -592,7 +607,12 @@ export function EventoDetalhe() {
                       data-testid="caixa-violacao"
                       className={s.caixa}
                       style={{
-                        ...caixaEmPorcento(v.bbox as Bbox, natural.w, natural.h),
+                        // A caixa do evento pode ter sido medida noutro quadro
+                        // (streammux do edge); `estiloDaCaixa` divide pelo
+                        // quadro CERTO. As caixas de correção e de rascunho,
+                        // abaixo, nascem no quadro da imagem exibida e por isso
+                        // continuam usando `natural`.
+                        ...(estiloDaCaixa(v, natural) ?? {}),
                         // contra-escala: a 8× uma borda de 2,5px come a evidência
                         borderWidth: `${2.5 / lupa.escala}px`,
                         borderRadius: `${4 / lupa.escala}px`,
