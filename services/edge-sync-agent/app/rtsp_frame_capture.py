@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 from typing import Any
 
 from .recorder_client import RecorderError
@@ -89,5 +90,75 @@ def capture_still_frame(
         )
         logger.warning("rtsp_frame_capture_empty stderr_tail=%s", stderr_tail)
         raise RecorderError(f"ffmpeg não produziu bytes para o frame: {stderr_tail}")
+
+    return stdout
+
+
+def extract_still_frame(
+    video_bytes: bytes,
+    popen: Any = subprocess.Popen,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> bytes:
+    """Primeiro quadro decodificável de um trecho de vídeo JÁ BAIXADO, em JPEG.
+
+    Irmã de `capture_still_frame`, e a diferença é a que importa para a
+    evidência: aquela abre uma conexão para pegar o AGORA; esta recebe os
+    bytes de uma janela de tempo do gravador (evidência do INSTANTE da
+    detecção, ver rtsp_timestamp_recorder_client.capture_frame_at).
+
+    Arquivo temporário, e não `pipe:0`, por medida: o MP4 que o
+    `loadfile.cgi` do iNVD 3032 devolve faz o ffmpeg parar em
+    "stream 0, offset 0x30: partial file" quando lido de um pipe — o
+    demuxer precisa de seek para o índice. Medido contra o gravador da RVB
+    em 09/09: mesmo trecho, mesmos bytes de saída (778546 B) que o caminho
+    RTSP, 0,26s pelo arquivo contra 3,44s pelo RTSP.
+
+    O arquivo nasce e morre dentro desta chamada (ADR-0045: os 128GB do
+    Orin são SO+app, nunca destino de armazenamento) — ~600KB por ~0,3s.
+    """
+    if not video_bytes:
+        raise RecorderError("trecho de vídeo vazio: nada para extrair")
+
+    with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
+        tmp.write(video_bytes)
+        tmp.flush()
+        cmd = [
+            "ffmpeg",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-i",
+            tmp.name,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            "-f",
+            "mjpeg",
+            "pipe:1",
+        ]
+        try:
+            proc = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as exc:
+            raise RecorderError(f"ffmpeg indisponível para extrair frame: {exc}") from exc
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise RecorderError(
+                f"ffmpeg não respondeu em {timeout_seconds}s ao extrair frame"
+            ) from None
+
+    if not stdout:
+        # Sem URL aqui (o vídeo já veio por outro caminho), mas o stderr do
+        # ffmpeg segue redigido: disciplina única para todo log de gravador.
+        stderr_tail = (
+            redact_url_credentials(stderr.decode(errors="replace"))[:_STDERR_TAIL]
+            if stderr else ""
+        )
+        logger.warning("extract_still_frame_empty stderr_tail=%s", stderr_tail)
+        raise RecorderError(f"ffmpeg não produziu bytes do trecho: {stderr_tail}")
 
     return stdout

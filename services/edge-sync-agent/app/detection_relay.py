@@ -22,12 +22,22 @@ that never discards (sqlite_buffer.py) on a box where a full disk is a
 device interlock (CLAUDE.md "Evidência"). The whole published payload is kept
 as the event payload — the cloud stores it as JSONB.
 
-EVIDÊNCIA (ADR-0070): antes de enfileirar, o relay captura UM frame ao vivo e
-o sobe pela nuvem (`SnapshotExecutor.capture_evidence`), gravando a chave R2
+EVIDÊNCIA (ADR-0070): antes de enfileirar, o relay captura UM frame e o sobe
+pela nuvem (`SnapshotExecutor.capture_evidence`), gravando a chave R2
 no payload — `alerta_de_evento_do_edge` não sobe imagem, ela espera a chave
 pronta. Sem isso todo alerta do box nascia com `evidence_r2_key` NULL e o
 operador abria a tela sem frame para julgar. A captura é best-effort com teto
 e pausa (ver abaixo): evidência é desejável, o alerta é obrigatório.
+
+INSTANTE DA EVIDÊNCIA (09/09/2026): esse frame era o AO VIVO, capturado no
+momento de enfileirar — sempre depois do quadro que gerou a caixa. Medido em
+200 alertas da RVB: mínimo 2,90s, mediana 4,75s, p95 15,77s, máximo 34,30s,
+NENHUM abaixo de 2,9s. O dono julgava 1.732 alertas olhando outro momento
+(uma pessoa a 1,4 m/s anda ~6,6 m na mediana). Agora o relay passa o
+`timestamp` do próprio evento para a captura, que pede ao gravador o quadro
+DAQUELE instante (`RtspTimestampRecorderClient.capture_frame_at`), e escreve
+no payload `evidence_origem` + `evidence_delta_s` — sem isso não há como
+provar depois que melhorou. Gravador sem o trecho -> ao vivo, marcado.
 
 GUARDA DE PESSOA (medido em 2026-09-09): 15% dos alertas da RVB nasciam de
 cena VAZIA — o modelo servido não tem classe `person`, então só o pixel
@@ -50,9 +60,11 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .guarda_pessoa import GuardaPessoa, build_guarda_pessoa_from_env
+from .snapshot_executor import ORIGEM_AO_VIVO
 from .sqlite_buffer import SQLiteBuffer
 
 logger = logging.getLogger(__name__)
@@ -145,35 +157,63 @@ class DetectionRelay:
             default=0.0,
         )
 
-    def _evidencia(self, camera_id: str) -> "tuple[str | None, bytes | None]":
-        """`(chave R2, JPEG)` do frame do evento. NUNCA levanta.
+    @staticmethod
+    def _instante_do_evento(payload: dict) -> "datetime | None":
+        """`timestamp` do payload como datetime, ou None se ausente/ilegível.
+
+        É o instante do QUADRO que gerou a caixa (o publicador o tira do mtime
+        do dump KITTI do DeepStream, ver deployments/edge/publicar_deteccoes.py)
+        — e é ele que ancora a evidência. Sem timestamp legível a captura cai
+        para o ao vivo: um evento sem hora não pode virar um alerta que não
+        chega.
+        """
+        bruto = payload.get("timestamp")
+        if not isinstance(bruto, str):
+            return None
+        try:
+            instante = datetime.fromisoformat(bruto)
+        except ValueError:
+            logger.warning("detection_relay_timestamp_ilegivel valor=%r", bruto[:40])
+            return None
+        return instante if instante.tzinfo else instante.replace(tzinfo=timezone.utc)
+
+    def _evidencia(
+        self, camera_id: str, instante: "datetime | None" = None
+    ) -> "tuple[str | None, bytes | None, str | None]":
+        """`(chave R2, JPEG, origem)` do frame do evento. NUNCA levanta.
+
+        *instante* é o momento da detecção. Com ele, a captura pede ao
+        gravador o quadro DAQUELE instante; sem ele (ou se o gravador não
+        tiver o trecho) volta o quadro ao vivo — que é o "agora", segundos
+        depois do que gerou a caixa. *origem* diz qual dos dois veio, e é o
+        que torna a diferença auditável no payload em vez de invisível.
 
         O JPEG volta porque é dele que o `GuardaPessoa` precisa — é o MESMO
-        quadro, sem uma segunda ida ao gravador. Um `(None, jpeg)` (upload
-        falhou, frame bom) ainda serve ao guarda.
+        quadro, sem uma segunda ida ao gravador. Um `(None, jpeg, ...)`
+        (upload falhou, frame bom) ainda serve ao guarda.
 
         Degradação para o lado seguro (R2 fora, gravador mudo, teto estourado):
         o evento segue para o buffer sem evidência. Alerta sem imagem é ruim;
         alerta que não chega é pior.
         """
         if self._evidence_capture is None:
-            return None, None
+            return None, None, None
         if self._clock() < self._pausa_ate:
-            return None, None
+            return None, None, None
         if not self._dentro_do_teto():
             logger.warning(
                 "detection_relay_evidencia_no_teto camera=%s max=%d/min — evento "
                 "segue sem imagem",
                 camera_id, self._max_evidence_per_min,
             )
-            return None, None
+            return None, None, None
         try:
-            chave, frame = self._evidence_capture(camera_id)
+            chave, frame, origem = self._evidence_capture(camera_id, instante)
         except Exception:  # noqa: BLE001 — evidência nunca bloqueia o alerta
             logger.warning(
                 "detection_relay_evidencia_falhou camera=%s", camera_id, exc_info=True
             )
-            chave, frame = None, None
+            chave, frame, origem = None, None, None
         if not chave:
             self._pausa_ate = self._clock() + _PAUSA_APOS_FALHA_S
             logger.warning(
@@ -181,7 +221,7 @@ class DetectionRelay:
                 "os eventos continuam subindo, sem imagem",
                 _PAUSA_APOS_FALHA_S, camera_id,
             )
-        return chave, frame
+        return chave, frame, origem
 
     def handle(self, channel: Any, data: Any) -> int | None:
         """One bus message → buffer row id, or None when dropped."""
@@ -205,9 +245,30 @@ class DetectionRelay:
         # ⛔ Não filtra o EVENTO: ele sobe de qualquer jeito, só sem imagem.
         confianca = self._confianca_maxima(payload)
         acima_do_piso = confianca >= self._piso_evidencia
-        evidencia, frame = self._evidencia(camera_id) if acima_do_piso else (None, None)
+        instante = self._instante_do_evento(payload)
+        evidencia, frame, origem = (
+            self._evidencia(camera_id, instante) if acima_do_piso else (None, None, None)
+        )
         if evidencia:
             payload["evidence_r2_key"] = evidencia
+        # DE QUE INSTANTE É O QUADRO. Sem isto não há como provar depois que a
+        # evidência melhorou — nem como o operador saber que está olhando um
+        # momento diferente do que gerou a caixa. Vai no payload (JSONB na
+        # nuvem, nenhuma migration) e no log, que é o que permite medir a
+        # distribuição do Δ em campo, do mesmo jeito que ela foi medida antes.
+        if origem:
+            payload["evidence_origem"] = origem
+            # 0.0 = o quadro foi PEDIDO no instante do evento. O alinhamento de
+            # I-frame do gravador pode adiantá-lo em até 1s (medido contra o
+            # OSD da câmera na RVB). Ao vivo: a distância real, que é o defeito.
+            delta = 0.0
+            if origem == ORIGEM_AO_VIVO and instante is not None:
+                delta = (datetime.now(timezone.utc) - instante).total_seconds()
+            payload["evidence_delta_s"] = round(delta, 2)
+            logger.info(
+                "detection_relay_evidencia camera=%s origem=%s delta_s=%.2f",
+                camera_id, origem, delta,
+            )
         # Cena sem gente não vira alerta — mas SÓ quando houve frame para olhar.
         # Sem frame o guarda não opina e o evento sobe: a violação que ninguém
         # viu é pior que o alerta a mais (app/guarda_pessoa.py).

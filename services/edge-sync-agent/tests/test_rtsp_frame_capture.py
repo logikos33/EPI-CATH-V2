@@ -10,7 +10,7 @@ import subprocess
 import pytest
 
 from app.recorder_client import RecorderError
-from app.rtsp_frame_capture import capture_still_frame
+from app.rtsp_frame_capture import capture_still_frame, extract_still_frame
 
 _VALID_URL = "rtsp://10.0.0.5:554/cam/realmonitor?channel=1&subtype=0"
 
@@ -131,3 +131,46 @@ def test_stderr_do_ffmpeg_nunca_vaza_a_senha_no_erro():
     assert SENHA not in str(exc_info.value)
     assert "***" in str(exc_info.value)
     assert "192.168.35.18" in str(exc_info.value)  # host segue visível p/ diagnóstico
+
+
+# ── extract_still_frame: quadro de um trecho JÁ baixado ────────────────────
+#
+# É o que permite a evidência do INSTANTE da detecção: o trecho vem do
+# gravador por HTTP (capture_frame_at) e o quadro sai daqui, sem abrir
+# conexão nova e sem a senha passar pelo argv do ffmpeg.
+
+def test_extract_still_frame_le_de_arquivo_e_nao_de_pipe():
+    """Arquivo, não `pipe:0`: o MP4 do iNVD 3032 faz o ffmpeg parar em
+    'partial file' quando lido de um pipe — o demuxer precisa de seek."""
+    capturado = {}
+
+    def _popen(cmd, **_kw):
+        capturado["cmd"] = cmd
+        return _FakeProc(stdout=b"\xff\xd8jpeg")
+
+    assert extract_still_frame(b"mp4-bytes", popen=_popen) == b"\xff\xd8jpeg"
+    cmd = capturado["cmd"]
+    assert "pipe:0" not in cmd
+    assert cmd[cmd.index("-i") + 1].endswith(".mp4")
+    assert cmd[-1] == "pipe:1"
+
+
+def test_extract_still_frame_trecho_vazio_levanta():
+    with pytest.raises(RecorderError, match="vazio"):
+        extract_still_frame(b"")
+
+
+def test_extract_still_frame_sem_saida_levanta_com_stderr_redigido():
+    """Mesma disciplina do caminho RTSP: o stderr do ffmpeg pode ecoar URL com
+    credencial do gravador."""
+    proc = _FakeProc(stdout=b"", stderr=b"erro em rtsp://admin:s3cr3t@10.0.0.5/x")
+    with pytest.raises(RecorderError) as exc:
+        extract_still_frame(b"mp4", popen=lambda *a, **k: proc)
+    assert "s3cr3t" not in str(exc.value)
+
+
+def test_extract_still_frame_timeout_mata_o_processo():
+    proc = _FakeProc(raise_timeout=True)
+    with pytest.raises(RecorderError, match="não respondeu"):
+        extract_still_frame(b"mp4", popen=lambda *a, **k: proc, timeout_seconds=0.1)
+    assert proc.killed is True

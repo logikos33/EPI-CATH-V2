@@ -21,14 +21,26 @@ this Dahua-OEM dialect, the real fix is Intelbras's CGI-based HTTP API
 implemented here because there is no source to confirm its exact contract
 without hardware to validate against (documented as a known gap, not
 invented).
+
+LACUNA ACIMA: FECHADA para o caminho de EVIDÊNCIA (09/09/2026). O contrato
+do CGI foi confirmado contra o gravador real da RVB (Intelbras iNVD 3032,
+firmware 4.001.00IB000.1.T) e vive em `capture_frame_at`, que devolve o
+quadro DO INSTANTE da detecção em vez do "agora". O endpoint que este
+comentário chutava (`playBack.cgi`) responde 501 Not Implemented neste
+firmware; o que funciona é `loadfile.cgi?action=startLoad`. `stream_clip`
+(clipe de evidência) segue no caminho RTSP — não foi tocado.
 """
 
 from __future__ import annotations
 
 import logging
 import socket
+import time
+import urllib.error
+import urllib.request
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Any
 from urllib.parse import quote
 
 from .recorder_client import (
@@ -40,12 +52,32 @@ from .recorder_client import (
     resolve_snapshot_channel,
 )
 from .rtsp_clip_stream import stream_rtsp_clip
-from .rtsp_frame_capture import capture_still_frame
+from .rtsp_frame_capture import capture_still_frame, extract_still_frame
 from .rtsp_validator import RTSPUrlValidator
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_SECONDS = 5.0
+
+#: Porta do CGI HTTP do gravador (dialeto Dahua/Intelbras). 0 DESLIGA a
+#: evidência ancorada no instante — toda captura volta a ser "o agora".
+_CGI_PORT_PADRAO = 80
+_CGI_TIMEOUT_S = 12.0
+#: Teto do trecho baixado. Medido no iNVD 3032: ~640KB por 3s de H.265
+#: 1280x720. O teto existe porque uma janela mal formada faria o gravador
+#: despejar o arquivo inteiro (>100MB) dentro do loop do relay.
+_CGI_MAX_BYTES = 16 * 1024 * 1024
+#: Janela pedida ao gravador. 3s cobre um GOP inteiro com folga; o primeiro
+#: quadro decodificável é o que volta. Medido na RVB em 09/09 contra o OSD
+#: da própria câmera: pedido -45s -> quadro 09:21:53 (exato); pedido -10s ->
+#: quadro 09:22:29 (+1s, alinhamento de I-frame).
+_JANELA_S = 3.0
+#: O relógio do gravador é medido, não presumido: o iNVD 3032 da RVB estava
+#: 333s ATRASADO em relação ao box em 09/09/2026 (medição repetida 5x em 5
+#: minutos, desvio estável entre 333 e 334s). Ancorar pelo relógio do BOX
+#: pediria um instante 5,5 min no FUTURO do gravador -> 404 em 100% dos
+#: casos. Recalculado a cada TTL porque relógio de aparelho anda sozinho.
+_TTL_RELOGIO_S = 600.0
 
 
 def _fmt(dt: datetime) -> str:
@@ -79,6 +111,10 @@ class RtspTimestampRecorderClient:
         timeout: float = _DEFAULT_TIMEOUT_SECONDS,
         stream_subtype: int = 0,
         collection_subtype_overrides: dict[str, int] | None = None,
+        cgi_port: int = _CGI_PORT_PADRAO,
+        url_opener: "Any | None" = None,
+        clock: "Any | None" = None,
+        agora: "Any | None" = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -91,6 +127,138 @@ class RtspTimestampRecorderClient:
         # Independente de self._stream_subtype (eixo OPERAÇÃO, usado pelo
         # live view). Câmera ausente daqui usa self._stream_subtype.
         self._collection_subtype_overrides = dict(collection_subtype_overrides or {})
+        # Eixo EVIDÊNCIA (CGI HTTP): independente dos eixos OPERAÇÃO/COLETA
+        # acima, que falam RTSP. cgi_port=0 desliga e todo mundo volta ao vivo.
+        self._cgi_port = cgi_port
+        self._url_opener = url_opener or self._montar_opener(host, cgi_port, username, password)
+        # Dois relógios, de propósito: `clock` é monotônico (TTL do cache, imune
+        # a salto de relógio) e `agora` é o de PAREDE do box, que é a régua
+        # contra a qual o desvio do gravador é medido.
+        self._clock = clock or time.monotonic
+        self._agora = agora or datetime.now
+        # (medido_em, desvio_s). None = ainda não medido / última medição falhou.
+        self._relogio: "tuple[float, float] | None" = None
+
+    # ── CGI HTTP do gravador (evidência ancorada no instante) ────────────────
+
+    @staticmethod
+    def _montar_opener(host: str, cgi_port: int, username: str, password: str) -> "Any | None":
+        """Opener urllib com digest. A senha fica no gerenciador em memória e
+        NUNCA na URL — diferente do caminho RTSP, onde ela viaja no argv do
+        ffmpeg e aparece no `ps`. Esse é um motivo concreto de a evidência
+        ancorada usar o CGI: ela some do `ps` junto com o Δ."""
+        if cgi_port <= 0:
+            return None
+        base = f"http://{host}:{cgi_port}"
+        gerenciador = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        gerenciador.add_password(None, base, username, password)
+        return urllib.request.build_opener(
+            urllib.request.HTTPDigestAuthHandler(gerenciador),
+            urllib.request.HTTPBasicAuthHandler(gerenciador),
+        )
+
+    def _cgi(self, caminho: str, max_bytes: int) -> bytes:
+        """Um GET no CGI do gravador. 401 vira RecorderAuthError para o
+        breaker anti-lockout do SnapshotExecutor fechar TODO acesso ao
+        aparelho — não só este caminho (CLAUDE.md: o gravador pune tentativa
+        repetida de autenticação)."""
+        if self._url_opener is None:
+            raise RecorderError("CGI do gravador desligado (cgi_port=0)")
+        url = f"http://{self._host}:{self._cgi_port}{caminho}"
+        try:
+            with self._url_opener.open(url, timeout=_CGI_TIMEOUT_S) as resposta:
+                return resposta.read(max_bytes)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                raise RecorderAuthError(
+                    f"gravador rejeitou a credencial no CGI (HTTP {exc.code})"
+                ) from exc
+            raise RecorderError(f"CGI do gravador respondeu HTTP {exc.code}") from exc
+        except Exception as exc:  # noqa: BLE001 — urllib levanta OSError/URLError/socket.*
+            raise RecorderError(f"CGI do gravador inacessível: {exc}") from exc
+
+    def _desvio_relogio(self) -> float:
+        """Segundos que o relógio do BOX está adiantado em relação ao gravador.
+
+        Medido, nunca presumido, e é o que faz a âncora funcionar: na RVB o
+        desvio era de 333s. Absorve de quebra qualquer diferença de fuso —
+        é uma subtração entre dois relógios de parede, não uma conversão.
+
+        Cacheado por `_TTL_RELOGIO_S` (0,1 requisição/min): relógio de
+        aparelho anda, mas não anda depressa.
+        """
+        agora = self._clock()
+        if self._relogio is not None and agora - self._relogio[0] < _TTL_RELOGIO_S:
+            return self._relogio[1]
+        bruto = self._cgi("/cgi-bin/global.cgi?action=getCurrentTime", 512)
+        texto = bruto.decode("utf-8", "replace").strip()
+        # "result=2026-09-09 09:22:38"
+        if "result=" not in texto:
+            raise RecorderError(f"relógio do gravador em formato inesperado: {texto[:60]!r}")
+        try:
+            hora_gravador = datetime.strptime(
+                texto.split("result=", 1)[1].strip(), "%Y-%m-%d %H:%M:%S"
+            )
+        except ValueError as exc:
+            raise RecorderError(f"relógio do gravador ilegível: {exc}") from exc
+        desvio = (self._agora() - hora_gravador).total_seconds()
+        self._relogio = (agora, desvio)
+        logger.info(
+            "gravador_relogio hora=%s desvio_s=%.0f — a evidência é ancorada no "
+            "relógio DO GRAVADOR, não no do box",
+            hora_gravador.isoformat(), desvio,
+        )
+        return desvio
+
+    def capture_frame_at(self, camera_id: str, instante: datetime) -> bytes:
+        """JPEG do quadro que o gravador tinha NO INSTANTE *instante*.
+
+        É a diferença entre a evidência mostrar o que gerou o alerta e mostrar
+        outro momento: a captura ao vivo (`capture_frame`/`get_snapshot`) pede
+        "o agora", e o agora é sempre segundos depois da detecção — medido em
+        200 alertas da RVB: mediana 4,75s, mínimo 2,90s, máximo 34,3s. Uma
+        pessoa a 1,4 m/s anda ~6,6 m na mediana.
+
+        Caminho: `loadfile.cgi` (CGI HTTP do dialeto Dahua/Intelbras) devolve
+        um MP4 da janela pedida; `extract_still_frame` tira o primeiro quadro.
+        A lacuna que o topo deste módulo registrava — "o conserto real é a API
+        CGI da Intelbras, não implementado por não haver hardware para
+        confirmar o contrato" — é a que esta função fecha, agora com o
+        contrato confirmado contra o iNVD 3032 da RVB (09/09/2026):
+          · RTSP DESCRIBE de /cam/playback com starttime/endtime -> 200 OK e
+            `a=range:npt=0-5.000000`, provando que a âncora é ACEITA;
+          · loadfile.cgi da mesma janela -> HTTP 200, MP4, e o JPEG extraído
+            saiu byte a byte IGUAL ao do caminho RTSP (778546 B);
+          · 0,79s pelo CGI contra 3,44s pelo RTSP — e a captura roda DENTRO
+            do loop que lê o pub/sub, então o tempo de parede aqui é tempo em
+            que o relay não lê o barramento;
+          · o OSD da própria câmera confere o Δ: pedido -45s -> quadro
+            09:21:53 (exato), pedido -10s -> 09:22:29 (+1s de I-frame).
+
+        Levanta RecorderError quando o gravador não tem o trecho (404 — ele
+        grava por movimento/agendamento, nem todo instante existe) ou quando
+        o CGI está fora. Quem chama DEGRADA para a captura ao vivo; evidência
+        ruim é ruim, alerta que não chega é pior.
+        """
+        canal = self._channel_for(camera_id)
+        desvio = self._desvio_relogio()
+        # tz-aware (payload manda ISO-8601 UTC) -> hora de parede do box, que é
+        # a mesma régua em que o desvio foi medido.
+        local = instante.astimezone().replace(tzinfo=None) if instante.tzinfo else instante
+        inicio = local - timedelta(seconds=desvio)
+        fim = inicio + timedelta(seconds=_JANELA_S)
+        fmt = lambda d: quote(d.strftime("%Y-%m-%d %H:%M:%S"), safe="")  # noqa: E731
+        trecho = self._cgi(
+            f"/cgi-bin/loadfile.cgi?action=startLoad&channel={canal}"
+            f"&startTime={fmt(inicio)}&endTime={fmt(fim)}",
+            _CGI_MAX_BYTES,
+        )
+        logger.info(
+            "evidencia_ancorada camera=%s canal=%d instante=%s janela_gravador=%s "
+            "desvio_s=%.0f bytes=%d",
+            camera_id, canal, instante.isoformat(), inicio.isoformat(), desvio, len(trecho),
+        )
+        return extract_still_frame(trecho)
 
     def _channel_for(self, camera_id: str) -> int:
         if camera_id in self._channel_map:

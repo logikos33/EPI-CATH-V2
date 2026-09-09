@@ -3,6 +3,7 @@ anti-lockout circuit breaker (a 401/403 from the recorder must suspend ALL
 future capture_snapshot attempts until process restart — CLAUDE.md, the
 gravador applies anti-brute-force lockout to repeated failed-auth attempts).
 """
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from app.recorder_client import RecorderAuthError, RecorderChannelError, RecorderError
@@ -271,7 +272,7 @@ def test_capture_evidence_devolve_r2_key_da_nuvem():
     executor = _make_executor(recorder, http)
 
     assert executor.capture_evidence("cam-1") == (
-        "evidence/cam-1/20260909T041800000000.jpg", b"jpeg-bytes",
+        "evidence/cam-1/20260909T041800000000.jpg", b"jpeg-bytes", "ao_vivo",
     )
     url, _kwargs = http.post.call_args
     assert url[0] == "http://cloud.test/api/v1/edge/cameras/cam-1/evidence"
@@ -283,7 +284,7 @@ def test_capture_evidence_sem_sinal_devolve_none_sem_levantar():
     recorder.get_snapshot.side_effect = RecorderError("sem sinal no canal")
     executor = _make_executor(recorder)
 
-    assert executor.capture_evidence("cam-1") == (None, None)
+    assert executor.capture_evidence("cam-1") == (None, None, None)
 
 
 def test_capture_evidence_auth_abre_o_mesmo_breaker_do_snapshot():
@@ -292,7 +293,7 @@ def test_capture_evidence_auth_abre_o_mesmo_breaker_do_snapshot():
     recorder.get_snapshot.side_effect = RecorderAuthError("401 Unauthorized")
     executor = _make_executor(recorder)
 
-    assert executor.capture_evidence("cam-1") == (None, None)
+    assert executor.capture_evidence("cam-1") == (None, None, None)
     assert executor.circuit_open is True
     assert executor.capture_and_upload("cam-2") == {
         "ok": False, "reason": "auth", "detail": "401 Unauthorized",
@@ -305,7 +306,7 @@ def test_capture_evidence_com_breaker_aberto_nao_toca_o_gravador():
     executor = _make_executor(recorder)
     executor._trip_circuit("credencial rejeitada")
 
-    assert executor.capture_evidence("cam-1") == (None, None)
+    assert executor.capture_evidence("cam-1") == (None, None, None)
     recorder.get_snapshot.assert_not_called()
 
 
@@ -318,4 +319,96 @@ def test_capture_evidence_upload_rejeitado_devolve_o_frame_sem_chave():
     http.post.return_value = _http_rejected(502)  # R2 fora do ar
     executor = _make_executor(recorder, http)
 
-    assert executor.capture_evidence("cam-1") == (None, b"jpeg-bytes")
+    assert executor.capture_evidence("cam-1") == (None, b"jpeg-bytes", "ao_vivo")
+
+
+# ── evidência ANCORADA no instante da detecção ─────────────────────────────
+#
+# O quadro tem de ser o do momento que gerou a caixa, não o "agora" que o
+# gravador devolve segundos depois. Contrato confirmado em hardware real
+# (Intelbras iNVD 3032 da RVB, 09/09/2026) — ver
+# rtsp_timestamp_recorder_client.capture_frame_at.
+
+_INSTANTE = datetime(2026, 9, 9, 4, 9, 1, tzinfo=timezone.utc)
+
+
+def test_capture_evidence_pede_o_quadro_do_instante_da_deteccao():
+    """Falha antes do conserto: `capture_evidence` só sabia pedir o ao vivo."""
+    recorder = MagicMock()
+    recorder.capture_frame_at.return_value = b"quadro-do-instante"
+    http = MagicMock()
+    http.post.return_value = _http_created()
+    executor = _make_executor(recorder, http)
+
+    chave, jpeg, origem = executor.capture_evidence("cam-1", _INSTANTE)
+
+    recorder.capture_frame_at.assert_called_once_with("cam-1", _INSTANTE)
+    recorder.get_snapshot.assert_not_called()  # nenhuma ida extra ao gravador
+    assert (jpeg, origem) == (b"quadro-do-instante", "gravador_no_instante")
+    assert chave == "evidence/cam-1/20260909T041800000000.jpg"
+
+
+def test_sem_instante_continua_no_ao_vivo():
+    """Chamada antiga (sem instante) segue funcionando: nada de alerta perdido
+    porque um publicador velho não manda timestamp."""
+    recorder = MagicMock()
+    recorder.get_snapshot.return_value = b"agora"
+    http = MagicMock()
+    http.post.return_value = _http_created()
+
+    _, jpeg, origem = _make_executor(recorder, http).capture_evidence("cam-1")
+
+    assert (jpeg, origem) == (b"agora", "ao_vivo")
+    recorder.capture_frame_at.assert_not_called()
+
+
+def test_gravador_sem_o_trecho_degrada_para_o_ao_vivo():
+    """O iNVD grava por movimento/agendamento: nem todo instante existe (404).
+    Evidência ruim é ruim; alerta que não chega é pior."""
+    recorder = MagicMock()
+    recorder.capture_frame_at.side_effect = RecorderError("404: sem gravação na janela")
+    recorder.get_snapshot.return_value = b"agora"
+    http = MagicMock()
+    http.post.return_value = _http_created()
+
+    _, jpeg, origem = _make_executor(recorder, http).capture_evidence("cam-1", _INSTANTE)
+
+    assert (jpeg, origem) == (b"agora", "ao_vivo")
+
+
+def test_playback_falho_pausa_e_nao_dobra_as_conexoes_no_gravador():
+    """A TRAVA do desenho: cada evento gasta UMA ida ao gravador. Se o playback
+    falhasse e o ao vivo entrasse a cada evento, a taxa contra um aparelho com
+    lockout anti-brute-force DOBRARIA. Depois da primeira falha, os eventos
+    seguintes vão direto ao vivo."""
+    recorder = MagicMock()
+    recorder.capture_frame_at.side_effect = RecorderError("CGI fora")
+    recorder.get_snapshot.return_value = b"agora"
+    http = MagicMock()
+    http.post.return_value = _http_created()
+    executor = _make_executor(recorder, http)
+    relogio = [1000.0]
+    executor._clock = lambda: relogio[0]
+
+    for _ in range(5):
+        relogio[0] += 1.0
+        executor.capture_evidence("cam-1", _INSTANTE)
+
+    assert recorder.capture_frame_at.call_count == 1, "playback insistiu dentro da pausa"
+    assert recorder.get_snapshot.call_count == 5
+
+    relogio[0] += 61.0  # passada a pausa, volta a tentar o instante certo
+    executor.capture_evidence("cam-1", _INSTANTE)
+    assert recorder.capture_frame_at.call_count == 2
+
+
+def test_auth_no_playback_abre_o_breaker_e_nao_tenta_o_ao_vivo():
+    """Credencial rejeitada nunca vira fallback: reusar credencial recusada
+    contra outro transporte é martelar o mesmo aparelho (anti-lockout)."""
+    recorder = MagicMock()
+    recorder.capture_frame_at.side_effect = RecorderAuthError("401")
+    executor = _make_executor(recorder, MagicMock())
+
+    assert executor.capture_evidence("cam-1", _INSTANTE) == (None, None, None)
+    recorder.get_snapshot.assert_not_called()
+    assert executor.circuit_open is True
