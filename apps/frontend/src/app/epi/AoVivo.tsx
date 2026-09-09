@@ -290,10 +290,14 @@ function Ladrilho({
 }: LadrilhoProps) {
   const ref = useRef<HTMLDivElement>(null)
   const naTela = useNaTela(ref)
-  const ativo = naTela && !suprimido && camera.is_active
+  // Mesma regra da parede: só `is_active === false` é inativa. Campo ausente
+  // é câmera viva — esconder vídeo por causa de um campo que não veio seria
+  // a tela decidindo por conta própria que a câmera está fora.
+  const inativa = camera.is_active === false
+  const ativo = naTela && !suprimido && !inativa
   const { hlsUrl, error } = useLiveView(camera.id, ativo)
 
-  const estado: EstadoCamera = !camera.is_active || error != null
+  const estado: EstadoCamera = inativa || error != null
     ? 'offline'
     : hlsUrl != null
       ? 'online'
@@ -326,7 +330,7 @@ function Ladrilho({
       {/* Reconectando é só quando de fato há o que reconectar. Câmera
           arquivada não está "tentando" nada — dizer que está seria mentir com
           animação. */}
-      {estado === 'offline' && camera.is_active && (
+      {estado === 'offline' && !inativa && (
         <LogikosLoader
           variante={compacto ? 'spinner' : 'tile'}
           estado="retry"
@@ -334,7 +338,11 @@ function Ladrilho({
           tamanho={grande ? 52 : 44}
         />
       )}
-      {estado === 'offline' && !camera.is_active && (
+      {/* Guarda, não caminho normal: desde o filtro `camerasVivas` a parede
+          não recebe mais câmera inativa. Se uma chegar aqui por outro
+          caminho, o certo é dizer o que ela é — não girar um "RECONECTANDO"
+          eterno para algo que não está tentando conectar. */}
+      {estado === 'offline' && inativa && (
         <span className={s.centradoDetalhe}>Câmera arquivada</span>
       )}
 
@@ -393,7 +401,10 @@ function Gaveta({
   onFechar: () => void
   onDestacar: () => void
 }) {
-  const { hlsUrl } = useLiveView(camera.id, camera.is_active)
+  // `is_active !== false` (e não a veracidade do campo): câmera cujo payload
+  // não traz is_active é tratada como VIVA — o mesmo critério do filtro da
+  // parede. Com a checagem antiga, campo ausente derrubava o playback.
+  const { hlsUrl } = useLiveView(camera.id, camera.is_active !== false)
   const [eventos, setEventos] = useState<AlertaRecente[] | null>(null)
 
   useEffect(() => {
@@ -414,7 +425,8 @@ function Gaveta({
     }
   }, [camera.id])
 
-  const estado: EstadoCamera = !camera.is_active ? 'offline' : hlsUrl != null ? 'online' : 'conectando'
+  const estado: EstadoCamera =
+    camera.is_active === false ? 'offline' : hlsUrl != null ? 'online' : 'conectando'
 
   return (
     <aside className={s.gaveta} aria-label={`Detalhes de ${camera.name}`}>
@@ -588,6 +600,23 @@ function CelulaSlot({
         (soltarAqui ? (
           <span className={s.soltePraTrocarSobre}>SOLTE PARA TROCAR</span>
         ) : (
+          <>
+          {/* Tirar do quadro ≠ excluir a câmera. Isto mexe SÓ nesta parede:
+              a câmera continua cadastrada, continua no Ao Vivo de quem não
+              usa este layout e volta pelo "Escolher câmera" do quadro vago.
+              Excluir de verdade é em Câmeras. */}
+          <button
+            type="button"
+            className={s.botaoTirar}
+            title={`Tirar ${camera.name} do quadro (não exclui a câmera)`}
+            aria-label={`Tirar ${camera.name} do quadro ${indice + 1}`}
+            onClick={(e) => {
+              e.stopPropagation()
+              onRemover()
+            }}
+          >
+            <X size={14} strokeWidth={1.9} aria-hidden />
+          </button>
           <label
             className={s.menuCelula}
             title="Trocar câmera desta posição"
@@ -599,11 +628,9 @@ function CelulaSlot({
               aria-label={`Trocar câmera do quadro ${indice + 1}`}
               value={camera.id}
               onChange={(e) => {
-                if (!e.target.value) onRemover()
-                else if (e.target.value !== camera.id) onEscolher(e.target.value)
+                if (e.target.value && e.target.value !== camera.id) onEscolher(e.target.value)
               }}
             >
-              <option value="">— remover —</option>
               {camerasDisponiveis.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -611,6 +638,7 @@ function CelulaSlot({
               ))}
             </select>
           </label>
+          </>
         ))}
     </div>
   )
@@ -677,10 +705,37 @@ export function AoVivo() {
   // hoje é o próprio socket. Sem ele, os ladrilhos seguem ONLINE sem avisar.
   const semSinal = !connected
 
+  /**
+   * A PAREDE SÓ RECEBE CÂMERA ATIVA (`is_active !== false`).
+   *
+   * Antes, câmera arquivada entrava na grade e virava um quadrado morto
+   * escrito "Câmera arquivada" — para sempre, porque não havia como tirá-la
+   * dali. O Ao Vivo existe para ver vídeo chegando; câmera inativa não tem
+   * vídeo por definição, então o ladrilho dela é um quadro que nunca vai
+   * acender ocupando espaço de um que ia.
+   *
+   * Some, mas NÃO em silêncio: `inativas` vira uma contagem clicável no
+   * cabeçalho. Sumir sem dizer para onde foi seria a tela mentindo sobre
+   * quantas câmeras o site tem.
+   *
+   * `!== false` e não `=== true`: se a API um dia parar de mandar o campo,
+   * o certo é mostrar a câmera, não esconder a parede inteira por um campo
+   * ausente.
+   *
+   * ⚠️ `is_active === false` é ARQUIVADA **ou** rascunho de importação em
+   * lote — a coluna serve aos dois (ver camera_repository.create_draft). Por
+   * isso o rótulo diz "INATIVAS", que é o que o dado afirma, e não
+   * "ARQUIVADAS", que seria afirmar mais do que se sabe.
+   */
+  const camerasVivas = useMemo(
+    () => (cameras ?? []).filter((c) => c.is_active !== false),
+    [cameras],
+  )
+
   useEffect(() => {
-    if (!connected || cameras == null) return
-    cameras.forEach((c) => subscribeCamera(c.id))
-  }, [cameras, connected, subscribeCamera])
+    if (!connected) return
+    camerasVivas.forEach((c) => subscribeCamera(c.id))
+  }, [camerasVivas, connected, subscribeCamera])
 
   const colunasEfetivas = COLUNAS_DO_PRESET[preset] ?? colunas
   const compacto = colunasEfetivas >= COLUNAS_COMPACTAS
@@ -692,7 +747,7 @@ export function AoVivo() {
   const gruposSite = useMemo(() => {
     const vistos = new Set<string>()
     const grupos: string[] = []
-    for (const c of cameras ?? []) {
+    for (const c of camerasVivas) {
       const chave = chaveDeSite(c)
       if (!vistos.has(chave)) {
         vistos.add(chave)
@@ -700,7 +755,7 @@ export function AoVivo() {
       }
     }
     return grupos
-  }, [cameras])
+  }, [camerasVivas])
 
   const siteAtivo =
     gruposSite.length <= 1
@@ -710,8 +765,19 @@ export function AoVivo() {
   const camerasDoSite = useMemo(
     () =>
       gruposSite.length <= 1
-        ? (cameras ?? [])
-        : (cameras ?? []).filter((c) => chaveDeSite(c) === siteAtivo),
+        ? camerasVivas
+        : camerasVivas.filter((c) => chaveDeSite(c) === siteAtivo),
+    [camerasVivas, gruposSite, siteAtivo],
+  )
+
+  /** Inativas do site em foco — o número que o cabeçalho mostra e linka. */
+  const inativasDoSite = useMemo(
+    () =>
+      (cameras ?? []).filter(
+        (c) =>
+          c.is_active === false &&
+          (gruposSite.length <= 1 || chaveDeSite(c) === siteAtivo),
+      ).length,
     [cameras, gruposSite, siteAtivo],
   )
 
@@ -736,8 +802,6 @@ export function AoVivo() {
     (id: string): Detection[] => (overlay ? (detections[id] ?? []) : []),
     [detections, overlay],
   )
-
-  const ativas = useMemo(() => camerasDoSite.filter((c) => c.is_active).length, [camerasDoSite])
 
   const destacar = useCallback((id: string) => {
     setPreset('destaque')
@@ -865,16 +929,24 @@ export function AoVivo() {
     )
   }
 
-  if (cameras == null || cameras.length === 0 || camerasDoSite.length === 0) {
+  if (camerasDoSite.length === 0) {
+    // Duas causas diferentes, dois textos diferentes: mandar "cadastre a
+    // primeira câmera" para quem tem 12 câmeras arquivadas seria a tela
+    // afirmando algo falso sobre o cadastro dele.
+    const soInativas = (cameras?.length ?? 0) > 0
     return (
       <div className={s.centrado}>
         <Video size={36} strokeWidth={1.5} aria-hidden />
-        <span className={s.centradoTitulo}>Nenhuma câmera neste site</span>
+        <span className={s.centradoTitulo}>
+          {soInativas ? 'Nenhuma câmera ativa neste site' : 'Nenhuma câmera neste site'}
+        </span>
         <span className={s.centradoTexto}>
-          Cadastre a primeira câmera para começar o monitoramento ao vivo.
+          {soInativas
+            ? `As ${cameras?.length} câmeras cadastradas estão inativas (arquivadas ou rascunho de importação) e não entram na parede. Desarquive em Câmeras para voltarem ao Ao Vivo.`
+            : 'Cadastre a primeira câmera para começar o monitoramento ao vivo.'}
         </span>
         <Link to={rotaNova('/epi/cameras')} className={s.acaoPrimaria}>
-          Adicionar câmera
+          {soInativas ? 'Ir para Câmeras' : 'Adicionar câmera'}
         </Link>
       </div>
     )
@@ -884,9 +956,16 @@ export function AoVivo() {
     <div className={s.pagina}>
       <div className={s.barra}>
         <h1 className={s.titulo}>Ao Vivo</h1>
-        <span className={s.resumo}>
-          {camerasDoSite.length} CÂMERAS · {ativas} ATIVAS
-        </span>
+        <span className={s.resumo}>{camerasDoSite.length} CÂMERAS</span>
+        {inativasDoSite > 0 && (
+          <Link
+            to={rotaNova('/epi/cameras')}
+            className={s.resumoInativas}
+            title="Câmera inativa (arquivada ou rascunho de importação) não entra na parede. Ver em Câmeras."
+          >
+            · {inativasDoSite} INATIVAS, FORA DA PAREDE
+          </Link>
+        )}
 
         {gruposSite.length > 1 && (
           <div className={s.colunas.inativo}>

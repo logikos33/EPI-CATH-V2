@@ -138,10 +138,59 @@ class TestCameraRepository:
         result = self.repo.get_all()
         assert len(result) == 2
 
-    def test_delete(self) -> None:
-        self.pool.mock_cursor.rowcount = 1
-        result = self.repo.delete(uuid4())
-        assert result == 1
+    def test_toda_leitura_de_camera_exclui_a_apagada(self) -> None:
+        """A garantia do requisito: câmera excluída some de TODAS as telas.
+
+        É por AQUI que ela some — todas as telas leem por estes métodos. Se
+        alguém tirar `deleted_at IS NULL` de qualquer um deles, a câmera
+        excluída reaparece só naquela superfície (lista, Ao Vivo, seletor do
+        grid, config do edge, inventário do superadmin, KPI do dashboard) e
+        nada mais quebra. Este teste é o que quebra.
+        """
+        cam_id, tenant_id, site_id = uuid4(), str(uuid4()), str(uuid4())
+        self.pool.mock_cursor.fetchone.return_value = None
+        self.pool.mock_cursor.fetchall.return_value = []
+
+        leituras = [
+            ("get_by_id", lambda: self.repo.get_by_id(cam_id)),
+            ("get_by_user", lambda: self.repo.get_by_user(cam_id)),
+            ("get_all", lambda: self.repo.get_all()),
+            ("get_by_id_and_tenant",
+             lambda: self.repo.get_by_id_and_tenant(str(cam_id), tenant_id)),
+            ("list_for_site_config",
+             lambda: self.repo.list_for_site_config(site_id, tenant_id)),
+            ("sum_fps_demand", lambda: self.repo.sum_fps_demand(site_id, tenant_id)),
+            ("count_active_all", lambda: self.repo.count_active_all(tenant_id)),
+            ("count_all", lambda: self.repo.count_all(tenant_id)),
+            ("count_by_module", lambda: self.repo.count_by_module(tenant_id, "epi")),
+            ("count_by_status",
+             lambda: self.repo.count_by_status(tenant_id, "epi", "active")),
+            ("get_inventory", lambda: self.repo.get_inventory(tenant_id=tenant_id)),
+        ]
+        for nome, chamada in leituras:
+            self.pool.mock_cursor.execute.reset_mock()
+            chamada()
+            sql = self.pool.mock_cursor.execute.call_args[0][0]
+            assert "deleted_at IS NULL" in sql, f"{nome} lê câmera excluída"
+
+    def test_soft_delete_marca_deleted_at_e_nao_apaga_linha(self) -> None:
+        """Excluir câmera é UPDATE, jamais DELETE físico.
+
+        O DELETE levaria alerta e evidência junto por CASCATA (registro
+        histórico, possível valor legal) e travaria por FK em câmera com
+        frame de treino — ver migration 138.
+        """
+        cam_id = uuid4()
+        self.pool.mock_cursor.fetchone.return_value = {"id": cam_id, "name": "Portaria"}
+        result = self.repo.soft_delete(cam_id)
+        assert result == {"id": cam_id, "name": "Portaria"}
+        sql = self.pool.mock_cursor.execute.call_args[0][0]
+        assert sql.strip().upper().startswith("UPDATE")
+        assert "DELETE FROM" not in sql.upper()
+        assert "deleted_at = NOW()" in sql
+        # is_active junto: todo filtro `is_active = true` que já existe passa a
+        # excluir a câmera sem precisar aprender o que é deleted_at.
+        assert "is_active = false" in sql
 
 
 class TestFrameRepository:
