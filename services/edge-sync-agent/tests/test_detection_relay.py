@@ -311,3 +311,68 @@ def test_falha_pausa_a_captura_mas_os_eventos_continuam(buf):
     agora[0] = 61.0                            # pausa expirou
     relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao()))
     assert len(chamadas) == 2
+
+
+# ── piso de confiança: a cota de evidência vai para quem vira alerta ─────────
+#
+# Medido no box da RVB em 09/09: 548 eventos em 15 min gastaram a cota de
+# 20/min por ordem de chegada, e só 2 de 75 ALERTAS nasceram com imagem — a
+# nuvem descarta abaixo de 0,50 e a cota já tinha ido embora em evento que
+# morreria ali.
+
+def _payload(conf: float) -> str:
+    return json.dumps({
+        "camera_id": "cam-1",
+        "has_violation": True,
+        "detections": [{"class": "Sem Luvas", "confidence": conf}],
+    })
+
+
+def _relay_com_captura(buffer, chamadas):
+    return DetectionRelay(
+        buffer,
+        lambda: _FakePubSub([]),
+        evidence_capture=lambda cid: (chamadas.append(cid) or "evidence/k.jpg"),
+        piso_evidencia=0.5,
+    )
+
+
+def test_evidencia_so_gasta_cota_acima_do_piso(buf):
+    chamadas = []
+    relay = _relay_com_captura(buf, chamadas)
+
+    relay.handle("det:cam-1", _payload(0.30))
+
+    # O EVENTO sobe — o piso não filtra evento, só decide onde gastar imagem.
+    assert buf.count_unsent() == 1
+    assert chamadas == [], "não pode bater no gravador por evento que a nuvem descarta"
+
+
+def test_evidencia_gasta_cota_quando_passa_do_piso(buf):
+    chamadas = []
+    relay = _relay_com_captura(buf, chamadas)
+
+    relay.handle("det:cam-1", _payload(0.66))
+
+    assert chamadas == ["cam-1"]
+    assert buf.count_unsent() == 1
+
+
+def test_evento_abaixo_do_piso_nao_consome_a_janela(buf):
+    """O que quebrava antes: 100 eventos fracos zeravam a cota do minuto e o
+    evento forte que vinha depois ficava sem imagem."""
+    chamadas = []
+    relay = _relay_com_captura(buf, chamadas)
+
+    for _ in range(100):
+        relay.handle("det:cam-1", _payload(0.30))
+    relay.handle("det:cam-1", _payload(0.90))
+
+    assert chamadas == ["cam-1"], "o forte tem de achar cota livre"
+
+
+def test_confianca_maxima_usa_a_maior_deteccao():
+    p = {"detections": [{"confidence": 0.2}, {"confidence": 0.7}, {"confidence": 0.4}]}
+    assert DetectionRelay._confianca_maxima(p) == 0.7
+    assert DetectionRelay._confianca_maxima({}) == 0.0
+    assert DetectionRelay._confianca_maxima({"detections": [{}]}) == 0.0
