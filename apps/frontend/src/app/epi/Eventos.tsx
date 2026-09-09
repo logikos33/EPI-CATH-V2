@@ -420,11 +420,15 @@ export function Eventos() {
 
   /**
    * Veredito humano — reusa `POST /api/verification/<id>/review`, que carimba
-   * `verified_by='user:<id>'` (a prova que a coluna VEREDITO lê). O MOTIVO
-   * (`reason`) é campo da tela de detalhe, onde há espaço para escrever: aqui
-   * o veredito é rápido e vai SEM motivo, exatamente como hoje — nunca com
-   * motivo vazio, que gravaria "justificado" sobre uma justificativa que
-   * ninguém deu. O motivo já registrado aparece abaixo do selo.
+   * `verified_by='user:<id>'` (a prova que a coluna VEREDITO lê).
+   *
+   * A assinatura AINDA aceita 'reject' porque é o contrato da rota, mas desta
+   * tela só sai 'approve': a linha não rejeita mais (ver o comentário do grupo
+   * de botões, abaixo). O MOTIVO (`reason`) continua sendo campo da tela de
+   * evidência, onde há espaço para escrever e o frame na frente — daqui o
+   * veredito vai SEM motivo, nunca com motivo vazio, que gravaria
+   * "justificado" sobre uma justificativa que ninguém deu. O motivo já
+   * registrado aparece abaixo do selo.
    */
   const julgar = async (id: string, verdict: 'approve' | 'reject') => {
     setOcupado(id)
@@ -628,6 +632,25 @@ export function Eventos() {
               {labelForVerificationReason(ev.verification_reason)}
             </span>
           )}
+          {/* ASSIMETRIA DELIBERADA — não "conserte" devolvendo o botão de
+              rejeitar aqui.
+
+              CONFIRMAR sem abrir é barato e reversível no sentido certo: a
+              linha JÁ mostra câmera, classe, horário e polaridade; concordar
+              com o que o detector afirmou não acrescenta afirmação nenhuma ao
+              acervo. REJEITAR é o contrário — é dizer "a máquina errou", e
+              esse veredito vira dado de treino: é dele que sai a recalibração.
+              Rejeitar sem ter olhado o frame envenena o acervo com ruído que
+              ninguém consegue auditar depois, e o `reject` sem `reason` é
+              justamente o que não se consegue reler ("errou por quê?").
+
+              Antes existia aqui um botão "Falso positivo" que mandava veredito
+              SEM motivo, enquanto a evidência exige motivo estruturado. Isso
+              fazia da regra do motivo um pedágio contornável a um clique de
+              distância — e quem está com pressa usa o atalho, sempre. Então o
+              atalho deixou de existir: quem rejeita passa pela evidência.
+
+              O link abaixo é a SAÍDA — some o controle, não o caminho. */}
           {veredito === 'nao-revisado' && podeJulgar && (
             <span className={s.grupoBotoes}>
               <button
@@ -637,13 +660,14 @@ export function Eventos() {
               >
                 Procedente
               </button>
-              <button
+              <NavLink
                 className={s.botao}
-                disabled={ocupado === ev.id}
-                onClick={() => void julgar(ev.id, 'reject')}
+                to={rotaNova(`/epi/eventos/${ev.id}`)}
+                aria-label="Abrir a evidência para marcar falso positivo"
+                title="Falso positivo se decide olhando o frame — e o motivo vai junto. Abre a evidência deste evento."
               >
-                Falso positivo
-              </button>
+                Falso positivo? →
+              </NavLink>
             </span>
           )}
         </td>

@@ -20,7 +20,7 @@
  * backend (`offset = (page-1)*per_page`). Trocar por offset cru ou cursor
  * nesta família já custou metade das linhas de uma página.
  */
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -208,7 +208,8 @@ describe('veredito humano ≠ veredito da IA', () => {
     montar()
     await screen.findByText('CAM-01 Doca Norte')
     // FALHA se a tela ler verification_verdict sem olhar verified_by. O selo é
-    // o que a tela AFIRMA; o botão "Falso positivo" ao lado é oferta de ação.
+    // o que a tela AFIRMA; a saída "Falso positivo? →" ao lado é oferta de
+    // CAMINHO — desde que rejeitar saiu da linha, ninguém acusa sem olhar.
     expect(seloVeredito('CAM-01 Doca Norte')).toContain('Não revisado')
     expect(seloVeredito('CAM-01 Doca Norte')).not.toContain('Falso positivo')
   })
@@ -222,12 +223,49 @@ describe('veredito humano ≠ veredito da IA', () => {
     )
   })
 
-  it('julgar é clique explícito e vai SEM motivo — o motivo é da tela de detalhe', async () => {
+  // ------------------------------------------------------------------
+  // POR QUE ESTES DOIS CASOS SUBSTITUÍRAM UM SÓ
+  //
+  // Até aqui existia um caso chamado "julgar é clique explícito e vai SEM
+  // motivo — o motivo é da tela de detalhe". Ele travava a decisão de que a
+  // LINHA julgava nos dois sentidos com um clique seco. Essa decisão caiu:
+  // a rejeição pela linha mandava veredito sem motivo enquanto a tela de
+  // evidência exigia motivo — a regra do motivo era contornável a um clique
+  // de distância, e quem tem pressa usa o atalho.
+  //
+  // Decisão nova (do dono, nestas palavras): "concordo com o falso positivo
+  // que está na linha, só ajusta quem viu as evidências". Rejeitar saiu da
+  // linha; confirmar ficou. Os dois casos abaixo travam os dois lados dessa
+  // assimetria — se alguém devolver o botão de rejeitar à linha achando que
+  // conserta uma regressão, o segundo caso fica vermelho.
+  // ------------------------------------------------------------------
+
+  it('a linha CONFIRMA com um clique — concordar não acrescenta afirmação nova', async () => {
     montar()
     await screen.findByText('CAM-04 Expedição')
     const botoes = [...linhaDe('CAM-04 Expedição').querySelectorAll('button')]
     fireEvent.click(botoes.find((b) => b.textContent === 'Procedente')!)
     await waitFor(() => expect(h.posts).toContain('/verification/e1/review'))
+  })
+
+  it('a linha NÃO rejeita: falso positivo só existe onde a pessoa vê a evidência', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const linha = linhaDe('CAM-04 Expedição')
+
+    // O CONTROLE sumiu: nada nesta linha dispara `reject` sem alguém olhar o
+    // frame. `reject` vira dado de treino — rejeitar às cegas envenena o
+    // acervo com ruído que ninguém consegue reler depois.
+    expect(within(linha).queryByRole('button', { name: 'Falso positivo' })).toBeNull()
+
+    // Mas o CAMINHO ficou visível, e por isso é asserção e não comentário:
+    // esconder o controle sem mostrar a saída deixaria o operador sem ter
+    // como discordar do detector — que é pior do que o atalho que saiu.
+    const saida = within(linha).getByRole('link', {
+      name: 'Abrir a evidência para marcar falso positivo',
+    })
+    expect(saida.getAttribute('href')).toBe(rotaNova('/epi/eventos/e1'))
+    expect(saida.textContent).toContain('Falso positivo')
   })
 })
 
@@ -392,7 +430,10 @@ describe('navegação lista→detalhe', () => {
       </MemoryRouter>,
     )
     await screen.findByText('CAM-04 Expedição')
-    fireEvent.click(linhaDe('CAM-04 Expedição').querySelector('a')!)
+    // Pelo NOME, não pelo primeiro <a> da linha: a coluna VEREDITO passou a
+    // ter o seu próprio link ("Falso positivo? →", mesmo destino), e um teste
+    // que acerta por coincidência de ordem para de valer no próximo layout.
+    fireEvent.click(within(linhaDe('CAM-04 Expedição')).getByRole('link', { name: 'Abrir →' }))
     expect(await screen.findByText('detalhe:e1')).toBeTruthy()
   })
 })
@@ -405,12 +446,17 @@ describe('permissão', () => {
     expect(h.gets).toEqual([])
   })
 
-  it('sem alerts:feedback não há BOTÃO de veredito (o selo continua)', async () => {
+  it('sem alerts:feedback não há veredito nem CONVITE a julgar (o selo continua)', async () => {
     h.permissoes = ['alerts:read']
     montar()
     await screen.findByText('CAM-04 Expedição')
     expect(screen.queryAllByRole('button', { name: 'Procedente' })).toHaveLength(0)
-    expect(screen.queryAllByRole('button', { name: 'Falso positivo' })).toHaveLength(0)
+    // A saída para a evidência é oferta de JULGAR, e some pelo mesmo gate.
+    // (Antes esta linha checava um botão "Falso positivo" que não existe mais
+    //  em lugar nenhum da tabela — asserção que não podia falhar é enfeite.)
+    expect(
+      screen.queryAllByRole('link', { name: 'Abrir a evidência para marcar falso positivo' }),
+    ).toHaveLength(0)
     // O veredito já registrado segue LEGÍVEL — esconder o julgamento de gente
     // por falta de permissão de julgar seria apagar prova, não proteger.
     expect(linhaDe('CAM-07 Linha 2').textContent).toContain('Procedente')
