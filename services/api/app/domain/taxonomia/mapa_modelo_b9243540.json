@@ -1,0 +1,156 @@
+{
+  "_leia_isto": [
+    "Mapa índice→classe do modelo b9243540 para o catálogo do tenant RVB.",
+    "É DADO, não código: quem muda a taxonomia mexe aqui, e o carregador",
+    "(taxonomia/__init__.py) recusa qualquer estado incoerente na hora de ler.",
+    "A ORDEM É O CONTRATO: o ONNX devolve um ÍNDICE; 'indice' aqui é o id da",
+    "categoria COCO do export de treino, que é o que o RF-DETR usou para",
+    "dimensionar a cabeça (13 saídas). Mexer na ordem troca os rótulos de",
+    "lugar sem erro nenhum — foi assim que um modelo de EPI chamou 'Sem",
+    "protetor de ouvido' de 'truck' em 61 de 61 detecções (#542)."
+  ],
+  "modelo_id": "b9243540-ea14-4949-a870-6b8d6470faab",
+  "modelo_display_name": "Logikos EPI 10 classes · 02/09 21h49",
+  "arquitetura": "rfdetr",
+  "onnx_r2_key": "models/63c219d8-fbef-4f3c-a7c9-058c742482e2/runpod/11f1303c-d40d-49cb-9fb9-8e8842ec477f/model.onnx",
+  "onnx_sha256": "5f54c0e709dda097a0d4def9a613391cf630758b8aacaf6fba25c036fb8e0218",
+  "onnx_bytes": 113869845,
+  "entrada_hw": [560, 560],
+  "saidas_do_modelo": 13,
+  "tenant_id": "63c219d8-fbef-4f3c-a7c9-058c742482e2",
+  "module_code": "epi",
+  "dataset_version_id": "3ca81334-dbb6-48d1-a767-209d1402686b",
+  "coco_r2_prefix": "dataset-exports/63c219d8-fbef-4f3c-a7c9-058c742482e2/96a88fef-fc7c-41cb-80fd-7c1170c90951/v17c-partes",
+  "medido_em": "2026-09-08",
+
+  "_papel": {
+    "evento": "vira detecção com nome do catálogo; a polaridade do catálogo decide se alerta.",
+    "interna": "SINAL INTERMEDIÁRIO. Alimenta o pareamento região↔EPI (ex.: regiao_boca_nariz × mascara). NUNCA vira evento, NUNCA vira alerta, NUNCA aparece na tela do cliente. Quem quiser 'só ligar essa classe também' está prestes a inundar a operação com caixas de orelha."
+  },
+
+  "classes": [
+    {
+      "indice": 0,
+      "modelo": "recognition",
+      "papel": "interna",
+      "catalogo": null,
+      "caixas_treino": 0,
+      "porque": "Placeholder de supercategoria do export estilo Roboflow (id 0, supercategory 'none'). Zero caixas em train/val/test. Existe só para ocupar o índice 0 da cabeça."
+    },
+    {
+      "indice": 1,
+      "modelo": "botas",
+      "papel": "evento",
+      "catalogo": "Botas",
+      "catalogo_fonte": "yolo_classes",
+      "catalogo_id": 10,
+      "polaridade_hoje": false,
+      "caixas_treino": 529,
+      "porque": "Classe do tenant, ativa. Polaridade = conformidade (presença de bota), então detectar NÃO alerta — a ausência é que alertaria, e 'Sem botas' (id 12) está arquivada."
+    },
+    {
+      "indice": 2,
+      "modelo": "luva",
+      "papel": "evento",
+      "catalogo": "Luvas",
+      "catalogo_fonte": "module_classes",
+      "catalogo_id": 4,
+      "polaridade_hoje": false,
+      "caixas_treino": 173,
+      "porque": "NÃO existe em yolo_classes do RVB — vive no catálogo GLOBAL (module_classes class_id=4, class_name='gloves', display_name='Luvas'). A polaridade servida é a UNIÃO global ∪ tenant (AlertRepository._nomes_por_polaridade), então casar pelo display_name funciona. ⛔ Não criar homônima em yolo_classes: ADR-0071 / TenantClassService._reject_if_in_global_catalog."
+    },
+    {
+      "indice": 3,
+      "modelo": "mao",
+      "papel": "interna",
+      "catalogo": null,
+      "caixas_treino": 313,
+      "porque": "Parte do corpo. É o ANCORADOURO de 'luva': mão sem luva pareada = mão desprotegida. Sozinha não é evento nenhum."
+    },
+    {
+      "indice": 4,
+      "modelo": "mascara",
+      "papel": "evento",
+      "catalogo": "mascara",
+      "catalogo_fonte": "yolo_classes",
+      "catalogo_id": 6,
+      "polaridade_hoje": false,
+      "arquivada_em": "2026-09-06",
+      "caixas_treino": 659,
+      "porque": "Classe do tenant, ARQUIVADA em 06/09 com decisão 'conformidade'. Arquivar tira do anotador, NÃO tira da polaridade (_nomes_por_polaridade não filtra archived_at) — então o mapa continua resolvendo. É frágil de propósito: se alguém passar a filtrar arquivadas, esta linha quebra ALTO no teste, não em produção."
+    },
+    {
+      "indice": 5,
+      "modelo": "mascara_incorreta",
+      "papel": "evento",
+      "catalogo": "Uso incorreto de mascara",
+      "catalogo_fonte": "yolo_classes",
+      "catalogo_id": 11,
+      "polaridade_hoje": null,
+      "caixas_treino": 153,
+      "porque": "O OBJETIVO Nº1 DO CLIENTE. Polaridade hoje é NULL = INDECISA: registra, não acusa (scripts/ops/aplicar_calibracao_rvb.py — 20,0% de precisão em 10 julgados; passava a 61,9% no dataset e não transferiu). Enquanto for NULL, embarcar este modelo NÃO produz alerta de máscara incorreta. Reverter para TRUE é decisão humana com nova rodada de calibração, não ajuste de configuração."
+    },
+    {
+      "indice": 6,
+      "modelo": "oculos",
+      "papel": "evento",
+      "catalogo": "Óculos",
+      "catalogo_fonte": "module_classes",
+      "catalogo_id": 6,
+      "polaridade_hoje": false,
+      "caixas_treino": 376,
+      "porque": "Mesma situação de 'luva': NÃO existe em yolo_classes do RVB, vive no catálogo global (class_name='glasses', display_name='Óculos'). Casa por display_name na união. ⛔ Não criar homônima (ADR-0071)."
+    },
+    {
+      "indice": 7,
+      "modelo": "orelha",
+      "papel": "interna",
+      "catalogo": null,
+      "caixas_treino": 2259,
+      "porque": "Parte do corpo, e a MAIS frequente do dataset (2259 caixas). Ancoradouro de 'protetor_auricular'. Se virar evento por engano, sozinha gera mais caixas que todas as classes de EPI somadas."
+    },
+    {
+      "indice": 8,
+      "modelo": "pessoa",
+      "papel": "interna",
+      "catalogo": null,
+      "caixas_treino": 0,
+      "porque": "Categoria declarada no export mas com ZERO caixas em train/val/test (dataset_versions.class_distribution a lista em '__sem_suporte_treino__'). A cabeça tem a saída; ela nunca foi treinada. Qualquer ativação aqui é ruído."
+    },
+    {
+      "indice": 9,
+      "modelo": "protetor_auricular",
+      "papel": "evento",
+      "catalogo": "Protetor auditivo",
+      "catalogo_fonte": "yolo_classes",
+      "catalogo_id": 4,
+      "polaridade_hoje": false,
+      "caixas_treino": 1892,
+      "porque": "O nome do modelo é 'auricular', mas a classe CANÔNICA do tenant é 'Protetor auditivo' (id 4). 'Protetor auricular' (id 5) foi arquivada DE PROPÓSITO por scripts/ops/unify_classes_rvb.py, que reapontou as anotações. Mapear para a id 5 desfaria a curadoria."
+    },
+    {
+      "indice": 10,
+      "modelo": "regiao_boca_nariz",
+      "papel": "interna",
+      "catalogo": null,
+      "caixas_treino": 917,
+      "porque": "Região facial. É o ancoradouro que dá sentido a 'mascara' vs 'mascara_incorreta': boca/nariz visível com máscara presente = uso incorreto. É esta classe que faz o modelo valer para o objetivo do cliente — e é exatamente por isso que ela NÃO pode virar alerta sozinha."
+    },
+    {
+      "indice": 11,
+      "modelo": "regiao_olhos",
+      "papel": "interna",
+      "catalogo": null,
+      "caixas_treino": 458,
+      "porque": "Região facial, ancoradouro de 'oculos'. Mesmo raciocínio de regiao_boca_nariz."
+    },
+    {
+      "indice": 12,
+      "modelo": "rosto",
+      "papel": "interna",
+      "catalogo": null,
+      "caixas_treino": 0,
+      "porque": "Categoria declarada com ZERO caixas ('__sem_suporte_treino__'). Nunca treinada."
+    }
+  ]
+}
