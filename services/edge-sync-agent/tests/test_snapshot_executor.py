@@ -270,7 +270,9 @@ def test_capture_evidence_devolve_r2_key_da_nuvem():
     http.post.return_value = _http_created()
     executor = _make_executor(recorder, http)
 
-    assert executor.capture_evidence("cam-1") == "evidence/cam-1/20260909T041800000000.jpg"
+    assert executor.capture_evidence("cam-1") == (
+        "evidence/cam-1/20260909T041800000000.jpg", b"jpeg-bytes",
+    )
     url, _kwargs = http.post.call_args
     assert url[0] == "http://cloud.test/api/v1/edge/cameras/cam-1/evidence"
 
@@ -281,7 +283,7 @@ def test_capture_evidence_sem_sinal_devolve_none_sem_levantar():
     recorder.get_snapshot.side_effect = RecorderError("sem sinal no canal")
     executor = _make_executor(recorder)
 
-    assert executor.capture_evidence("cam-1") is None
+    assert executor.capture_evidence("cam-1") == (None, None)
 
 
 def test_capture_evidence_auth_abre_o_mesmo_breaker_do_snapshot():
@@ -290,7 +292,7 @@ def test_capture_evidence_auth_abre_o_mesmo_breaker_do_snapshot():
     recorder.get_snapshot.side_effect = RecorderAuthError("401 Unauthorized")
     executor = _make_executor(recorder)
 
-    assert executor.capture_evidence("cam-1") is None
+    assert executor.capture_evidence("cam-1") == (None, None)
     assert executor.circuit_open is True
     assert executor.capture_and_upload("cam-2") == {
         "ok": False, "reason": "auth", "detail": "401 Unauthorized",
@@ -303,15 +305,17 @@ def test_capture_evidence_com_breaker_aberto_nao_toca_o_gravador():
     executor = _make_executor(recorder)
     executor._trip_circuit("credencial rejeitada")
 
-    assert executor.capture_evidence("cam-1") is None
+    assert executor.capture_evidence("cam-1") == (None, None)
     recorder.get_snapshot.assert_not_called()
 
 
-def test_capture_evidence_upload_rejeitado_devolve_none():
+def test_capture_evidence_upload_rejeitado_devolve_o_frame_sem_chave():
+    """Upload falho não perde o pixel: o frame é bom e o GuardaPessoa ainda o
+    julga — só o alerta é que nasce sem imagem."""
     recorder = MagicMock()
     recorder.get_snapshot.return_value = b"jpeg-bytes"
     http = MagicMock()
     http.post.return_value = _http_rejected(502)  # R2 fora do ar
     executor = _make_executor(recorder, http)
 
-    assert executor.capture_evidence("cam-1") is None
+    assert executor.capture_evidence("cam-1") == (None, b"jpeg-bytes")
