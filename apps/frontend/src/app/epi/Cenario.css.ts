@@ -481,7 +481,32 @@ const chipBase = {
 export const chipClasse = {
   ativo: style({ ...chipBase, border: `1.5px solid ${lk.cor.cianoVisao}`, background: 'rgba(244,246,248,.05)', color: lk.cor.brancoSinal }),
   inativo: style({ ...chipBase, border: `1.5px solid ${lk.cor.bordaForte}`, background: 'transparent', color: lk.cor.cinzaNevoa }),
+  /** Classe do catálogo que a regra não aceita ou que o modelo desta câmera
+   * não reconhece. Cor NÃO é o estado (lk.css.ts): quem não distingue âmbar
+   * ainda lê o selo dentro do chip e o motivo logo abaixo da lista. */
+  restrito: style({
+    ...chipBase,
+    border: `1.5px dashed ${lk.estado.atencao}`,
+    background: 'rgba(232,161,60,.06)',
+    color: lk.estado.atencao,
+    cursor: 'default',
+  }),
 }
+
+export const seloChip = style({
+  fontSize: '10px',
+  fontWeight: 700,
+  letterSpacing: '.06em',
+  textTransform: 'uppercase',
+  padding: '2px 6px',
+  borderRadius: '9px',
+  background: 'rgba(232,161,60,.18)',
+  color: lk.estado.atencao,
+})
+
+export const blocoMotivos = style({ display: 'flex', flexDirection: 'column', gap: '5px' })
+
+export const motivoLinha = style({ fontSize: '11.5px', lineHeight: 1.45, color: lk.estado.atencao })
 
 export const pontoChip = {
   ativo: style({ width: '9px', height: '9px', borderRadius: '50%', background: lk.cor.cianoVisao }),
