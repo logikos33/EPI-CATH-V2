@@ -1,4 +1,13 @@
-"""SnapshotExecutor — executes `capture_snapshot` edge commands.
+"""SnapshotExecutor — captura no gravador + upload pra nuvem, com breaker.
+
+Dois clientes, um só caminho até o gravador:
+  · `capture_and_upload` — comando `capture_snapshot` (miniatura de triagem);
+  · `capture_evidence`   — evidência do alerta que o `DetectionRelay` acabou
+    de receber do barramento `det:*` (o frame que o operador vai julgar).
+
+Os dois compartilham o MESMO circuit breaker de propósito: uma credencial
+rejeitada tem de parar todo acesso ao gravador, não só o caminho que a
+descobriu.
 
 Two steps per command: `RecorderClient.get_snapshot(camera_id, channel_hint)`
 (ONVIF GetSnapshotUri, D-85, falling back to a live-frame RTSP grab — see
@@ -190,13 +199,21 @@ class SnapshotExecutor:
 
     # ── upload ───────────────────────────────────────────────────────────
 
-    def _upload(self, camera_id: str, jpeg_bytes: bytes) -> None:
-        url = f"{self._upload_url_base}/{camera_id}/snapshot"
+    def _upload(self, camera_id: str, jpeg_bytes: bytes, rota: str = "snapshot") -> "str | None":
+        """POST do JPEG para `/api/v1/edge/cameras/<id>/<rota>`.
+
+        Devolve a `r2_key` que a nuvem respondeu (None se ela não mandou
+        nenhuma — o caminho de snapshot não depende dela). É esse valor que
+        vira `alerts.evidence_r2_key` no caminho de evidência: o box NÃO tem
+        credencial de R2 e nunca terá, então a chave só pode vir de quem
+        gravou o objeto.
+        """
+        url = f"{self._upload_url_base}/{camera_id}/{rota}"
         try:
             resp = self._http.post(
                 url,
                 headers={"Authorization": f"Bearer {self._token}"},
-                files={"file": ("snapshot.jpg", jpeg_bytes, "image/jpeg")},
+                files={"file": (f"{rota}.jpg", jpeg_bytes, "image/jpeg")},
                 timeout=self._timeout,
             )
         except Exception as exc:
@@ -209,3 +226,46 @@ class SnapshotExecutor:
                 f"upload rejeitado: camera={camera_id} status={resp.status_code} "
                 f"body={getattr(resp, 'text', '')[:200]}"
             )
+        try:
+            return ((resp.json() or {}).get("data") or {}).get("r2_key")
+        except Exception:  # noqa: BLE001 — corpo não-JSON não invalida o upload
+            return None
+
+    # ── evidência de alerta ──────────────────────────────────────────────
+
+    def capture_evidence(self, camera_id: str) -> "str | None":
+        """Captura UM frame e o sobe como evidência; devolve a chave R2 ou None.
+
+        Mesmo par captura+upload do snapshot, e de propósito o MESMO breaker:
+        uma credencial rejeitada tem de parar TODO acesso ao gravador, não só
+        o caminho que a descobriu (anti-lockout, CLAUDE.md).
+
+        Nunca levanta. Evidência é desejável, não pode bloquear o alerta —
+        quem chama enfileira o evento com `None` e a nuvem grava o alerta sem
+        imagem, que é pior que ter imagem e MUITO melhor que não ter alerta.
+        """
+        if self._circuit_open:
+            logger.warning(
+                "evidence_capture_skipped camera_id=%s reason=circuito_aberto", camera_id
+            )
+            return None
+        try:
+            jpeg_bytes = self._recorder.get_snapshot(camera_id)
+        except RecorderAuthError as exc:
+            self._trip_circuit(str(exc))
+            return None
+        except Exception as exc:  # noqa: BLE001 — sem sinal/timeout/canal: sem evidência, com alerta
+            logger.warning(
+                "evidence_capture_failed camera_id=%s err=%s", camera_id, exc
+            )
+            return None
+        try:
+            r2_key = self._upload(camera_id, jpeg_bytes, rota="evidence")
+        except SnapshotUploadError as exc:
+            logger.warning("evidence_upload_failed camera_id=%s err=%s", camera_id, exc)
+            return None
+        logger.info(
+            "evidence_uploaded camera_id=%s r2_key=%s bytes=%d",
+            camera_id, r2_key, len(jpeg_bytes),
+        )
+        return r2_key

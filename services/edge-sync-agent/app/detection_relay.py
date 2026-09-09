@@ -20,7 +20,14 @@ Message → event rule: only frames flagged `has_violation` become a
 cameras, ephemeral by ADR-0002); relaying every frame would grow a buffer
 that never discards (sqlite_buffer.py) on a box where a full disk is a
 device interlock (CLAUDE.md "Evidência"). The whole published payload is kept
-as the event payload — no reshaping, the cloud stores it as JSONB.
+as the event payload — the cloud stores it as JSONB.
+
+EVIDÊNCIA (ADR-0070): antes de enfileirar, o relay captura UM frame ao vivo e
+o sobe pela nuvem (`SnapshotExecutor.capture_evidence`), gravando a chave R2
+no payload — `alerta_de_evento_do_edge` não sobe imagem, ela espera a chave
+pronta. Sem isso todo alerta do box nascia com `evidence_r2_key` NULL e o
+operador abria a tela sem frame para julgar. A captura é best-effort com teto
+e pausa (ver abaixo): evidência é desejável, o alerta é obrigatório.
 
 Opt-in: `EDGE_REDIS_URL` unset → loop not built (see
 build_detection_relay_from_env). Transport errors propagate out of `run()`:
@@ -34,6 +41,7 @@ import json
 import logging
 import os
 import threading
+import time
 from typing import Any, Callable
 
 from .sqlite_buffer import SQLiteBuffer
@@ -45,6 +53,20 @@ logger = logging.getLogger(__name__)
 _PATTERNS: tuple[str, ...] = ("det:*", "detections:*")
 _EVENT_TYPE = "detection"
 _DEFAULT_POLL_S = 1.0
+#: Teto GLOBAL de capturas de evidência por minuto (todas as câmeras somadas).
+#: Anti-lockout: cada captura é UMA conexão RTSP nova no gravador
+#: (192.168.35.18 na RVB, 29 canais no mesmo aparelho). O publicador já
+#: espaça por câmera (--cooldown-s 30), mas ele não enxerga o total: com 29
+#: câmeras o pior caso seria ~58/min. Este teto não depende de quantas
+#: câmeras o site tem — estourou, o evento sobe SEM evidência.
+_DEFAULT_MAX_EVIDENCE_PER_MIN = 20
+#: Falhou a evidência → nem tenta pelos próximos 60s. Existe pelo custo de
+#: BLOQUEIO, não pela falha em si: `capture_evidence` roda DENTRO do loop
+#: que lê o pub/sub, e uma nuvem fora do ar leva o timeout inteiro (15s) em
+#: cada evento. Sem esta pausa, R2 indisponível deixaria de custar 'alerta
+#: sem imagem' e passaria a custar 'alerta que não chega' — exatamente o
+#: que a degradação tenta evitar.
+_PAUSA_APOS_FALHA_S = 60.0
 
 
 def _text(value: Any) -> str:
@@ -59,10 +81,70 @@ class DetectionRelay:
         buffer: SQLiteBuffer,
         pubsub_factory: Callable[[], Any],
         poll_s: float = _DEFAULT_POLL_S,
+        evidence_capture: "Callable[[str], str | None] | None" = None,
+        max_evidence_per_min: int = _DEFAULT_MAX_EVIDENCE_PER_MIN,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._buffer = buffer
         self._pubsub_factory = pubsub_factory
         self._poll_s = poll_s
+        # None = relay sem evidência (comportamento anterior): o evento chega,
+        # o alerta nasce sem imagem. É o que acontecia com TODO alerta do box.
+        self._evidence_capture = evidence_capture
+        self._max_evidence_per_min = max_evidence_per_min
+        self._clock = clock
+        self._janela_inicio = clock()
+        self._na_janela = 0
+        self._pausa_ate = 0.0
+
+    # ── evidência ────────────────────────────────────────────────────────────
+
+    def _dentro_do_teto(self) -> bool:
+        """Janela fixa de 60s. Conta TENTATIVAS, não sucessos: é a tentativa
+        que bate no gravador, e é ela que precisa ser limitada."""
+        agora = self._clock()
+        if agora - self._janela_inicio >= 60.0:
+            self._janela_inicio = agora
+            self._na_janela = 0
+        if self._na_janela >= self._max_evidence_per_min:
+            return False
+        self._na_janela += 1
+        return True
+
+    def _evidencia(self, camera_id: str) -> "str | None":
+        """Chave R2 do frame do evento, ou None. NUNCA levanta.
+
+        Degradação para o lado seguro (R2 fora, gravador mudo, teto estourado):
+        o evento segue para o buffer sem evidência. Alerta sem imagem é ruim;
+        alerta que não chega é pior.
+        """
+        if self._evidence_capture is None:
+            return None
+        if self._clock() < self._pausa_ate:
+            return None
+        if not self._dentro_do_teto():
+            logger.warning(
+                "detection_relay_evidencia_no_teto camera=%s max=%d/min — evento "
+                "segue sem imagem",
+                camera_id, self._max_evidence_per_min,
+            )
+            return None
+        try:
+            chave = self._evidence_capture(camera_id)
+        except Exception:  # noqa: BLE001 — evidência nunca bloqueia o alerta
+            logger.warning(
+                "detection_relay_evidencia_falhou camera=%s", camera_id, exc_info=True
+            )
+            chave = None
+        if not chave:
+            self._pausa_ate = self._clock() + _PAUSA_APOS_FALHA_S
+            logger.warning(
+                "detection_relay_evidencia_pausada por %.0fs após falha (camera=%s) — "
+                "os eventos continuam subindo, sem imagem",
+                _PAUSA_APOS_FALHA_S, camera_id,
+            )
+            return None
+        return chave
 
     def handle(self, channel: Any, data: Any) -> int | None:
         """One bus message → buffer row id, or None when dropped."""
@@ -74,6 +156,15 @@ class DetectionRelay:
         if not isinstance(payload, dict) or not payload.get("has_violation"):
             return None
         camera_id = str(payload.get("camera_id") or _text(channel).rsplit(":", 1)[-1])
+        # A chave entra no PAYLOAD (não numa coluna nova do buffer): o schema
+        # do SQLite é `CREATE TABLE IF NOT EXISTS`, então uma coluna nova
+        # simplesmente não apareceria num buffer já existente no box. O
+        # Uploader promove o campo para o nível do evento, que é onde
+        # /edge/events/ingest o lê. Gravada ANTES do enqueue, ela é estável
+        # entre reenvios — o dedup da nuvem é sha256 do evento serializado.
+        evidencia = self._evidencia(camera_id)
+        if evidencia:
+            payload["evidence_r2_key"] = evidencia
         return self._buffer.enqueue(_EVENT_TYPE, camera_id, payload)
 
     def run(self, stop_event: threading.Event) -> None:
@@ -92,18 +183,38 @@ class DetectionRelay:
 
 
 def build_detection_relay_from_env(
-    buffer: SQLiteBuffer, env: dict[str, str] | None = None
+    buffer: SQLiteBuffer,
+    env: dict[str, str] | None = None,
+    evidence_capture: "Callable[[str], str | None] | None" = None,
 ) -> DetectionRelay | None:
-    """`EDGE_REDIS_URL` set → relay on the local Redis; unset → None (off)."""
+    """`EDGE_REDIS_URL` set → relay on the local Redis; unset → None (off).
+
+    *evidence_capture* — normalmente `SnapshotExecutor.capture_evidence`
+    (main.py). Ausente, o relay volta ao comportamento anterior: evento sem
+    imagem. Teto por `EDGE_MAX_EVIDENCE_PER_MIN` (0 desliga a captura).
+    """
     source = env if env is not None else os.environ
     url = source.get("EDGE_REDIS_URL", "").strip()
     if not url:
         logger.info("detection_relay_disabled EDGE_REDIS_URL unset")
         return None
 
+    teto = int(source.get("EDGE_MAX_EVIDENCE_PER_MIN", str(_DEFAULT_MAX_EVIDENCE_PER_MIN)))
+    if teto <= 0:
+        evidence_capture = None
+    logger.info(
+        "detection_relay_evidencia=%s teto=%d/min",
+        "ligada" if evidence_capture is not None else "desligada", teto,
+    )
+
     def _factory() -> Any:
         import redis  # lazy: only needed when the relay is on
 
         return redis.Redis.from_url(url).pubsub()
 
-    return DetectionRelay(buffer, _factory)
+    return DetectionRelay(
+        buffer,
+        _factory,
+        evidence_capture=evidence_capture,
+        max_evidence_per_min=teto,
+    )
