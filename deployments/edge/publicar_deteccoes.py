@@ -77,7 +77,16 @@ _UNIDADE_BBOX = "pixels_xywh_streammux"
 def parse_kitti(texto: str) -> list[dict]:
     """Linhas KITTI do DeepStream → detecções.
 
-    Formato: `<classe> 0.0 0 0.0 <x1> <y1> <x2> <y2> 0.0×7 <confiança>`.
+    DOIS formatos, e a diferença é o que permite deduplicar por PESSOA:
+
+      GIE      `<classe> 0.0 0 0.0 <x1> <y1> <x2> <y2> 0.0×7 <conf>`      (16)
+      tracker  `<classe> <id> 0.0 0 0.0 <x1> <y1> <x2> <y2> 0.0×7 <conf>` (17)
+
+    Distinguir por CONTAGEM de campos seria frágil (uma linha truncada viraria
+    a outra); distingue-se pelo segundo campo: no GIE ele é `0.0` (tem ponto),
+    no tracker é um inteiro. Sem `kitti-track-output-dir` ligado no DeepStream
+    só chega o primeiro formato, e tudo segue como antes.
+
     Linha curta/ruim é ignorada: o dump pode ser lido no meio da escrita, e
     derrubar o loop por causa de uma linha é pior do que perder um frame.
     """
@@ -86,17 +95,25 @@ def parse_kitti(texto: str) -> list[dict]:
         campos = linha.split()
         if len(campos) < 16:
             continue
+        com_trilha = "." not in campos[1]
+        base = 1 if com_trilha else 0
+        if com_trilha and len(campos) < 17:
+            continue
         try:
-            x1, y1, x2, y2 = (float(v) for v in campos[4:8])
-            confianca = float(campos[15])
+            x1, y1, x2, y2 = (float(v) for v in campos[4 + base:8 + base])
+            confianca = float(campos[15 + base])
+            trilha = int(campos[1]) if com_trilha else None
         except ValueError:
             continue
-        saida.append({
+        det = {
             "class": campos[0],
             "confidence": round(confianca, 4),
             "bbox": [round(x1, 1), round(y1, 1), round(x2 - x1, 1), round(y2 - y1, 1)],
             "bbox_unidade": _UNIDADE_BBOX,
-        })
+        }
+        if trilha is not None:
+            det["track_id"] = trilha
+        saida.append(det)
     return saida
 
 
@@ -179,6 +196,11 @@ class Publicador:
         #: o piso decide "já não faz pouquíssimo tempo?".
         self._ultima_publicacao: dict[str, float] = {}
         self._piso_entre_s = piso_entre_s
+        #: {camera: {(classe, track_id): instante da última publicação}}.
+        #: Quando o dump traz `track_id`, é ISTO que decide, e não a contagem:
+        #: a MESMA pessoa acompanhada quadro a quadro é UM evento, e uma pessoa
+        #: NOVA é evento na hora — que foi o pedido do dono, palavra por palavra.
+        self._trilhas: dict[str, dict[tuple[str, int], float]] = {}
         self.contagem: Counter = Counter()
 
     def cooldown_de(self, camera_id: str) -> float:
@@ -219,10 +241,14 @@ class Publicador:
         #
         # Conformidade não vira alerta (a nuvem a descarta na polaridade), logo
         # não pode decidir se um alerta nasce.
-        contagem = Counter(
-            str(d.get("class", "")) for d in deteccoes
+        violacoes = [
+            d for d in deteccoes
             if self._violacao is None or str(d.get("class", "")).lower() in self._violacao
-        )
+        ]
+        if violacoes and all(d.get("track_id") is not None for d in violacoes):
+            return self._deve_publicar_por_trilha(camera_id, violacoes, instante)
+
+        contagem = Counter(str(d.get("class", "")) for d in violacoes)
         abertura, maximo = self._janela.get(camera_id, (0.0, Counter()))
         if instante - abertura >= self.cooldown_de(camera_id):
             self._janela[camera_id] = (instante, contagem)   # janela nova
@@ -244,6 +270,48 @@ class Publicador:
             self._ultima_publicacao[camera_id] = instante
             return True
         return False
+
+    def _deve_publicar_por_trilha(
+        self, camera_id: str, violacoes: list[dict], instante: float
+    ) -> bool:
+        """A MESMA pessoa é um evento; uma pessoa NOVA é evento na hora.
+
+        Por que isto substitui a contagem quando há `track_id`: contar classes é
+        uma aproximação de "a cena mudou?" que erra nos dois sentidos — duas
+        pessoas sem protetor viram contagem 2 e depois 1 por falha de detecção
+        (recall 0,57, ADR-0067), e o dedup republica achando que a cena cresceu.
+        Com trilha não há aproximação: a identidade vem do tracker, quadro a
+        quadro. O cooldown deixa de ser heurística de "quanto tempo até poder
+        repetir" e vira o que o dono pediu — REVALIDAÇÃO de uma situação que
+        continua acontecendo.
+
+        ⚠️ Herda o que o tracker erra: se ele TROCA o id da mesma pessoa (oclusão
+        longa, pessoa que sai e volta), vira evento novo. É falso positivo, não
+        violação muda — o lado seguro para errar num produto de segurança.
+        """
+        trilhas = self._trilhas.setdefault(camera_id, {})
+        cooldown = self.cooldown_de(camera_id)
+        novidade = False
+        for d in violacoes:
+            chave = (str(d.get("class", "")), int(d["track_id"]))
+            visto = trilhas.get(chave)
+            if visto is None or instante - visto >= cooldown:
+                novidade = True
+        if not novidade:
+            return False
+        # O piso vale igual: o tracker também oscila no primeiro segundo de vida
+        # de uma trilha, e três nascimentos seguidos não são três pessoas.
+        if instante - self._ultima_publicacao.get(camera_id, 0.0) < self._piso_entre_s:
+            return False
+        for d in violacoes:
+            trilhas[(str(d.get("class", "")), int(d["track_id"]))] = instante
+        # Poda: trilha sem aparecer por 2 cooldowns saiu de cena. Sem isto o
+        # dicionário cresce para sempre num processo que roda por semanas.
+        limite = instante - 2 * cooldown
+        for chave in [k for k, v in trilhas.items() if v < limite]:
+            del trilhas[chave]
+        self._ultima_publicacao[camera_id] = instante
+        return True
 
     def tem_violacao(self, deteccoes: list[dict]) -> bool:
         if not deteccoes:
@@ -439,6 +507,64 @@ def autoteste() -> int:
     p8._cooldown_por_camera["cam"] = 5.0
     assert p8.cooldown_de("cam") == 5.0
     assert p8.cooldown_de("outra") == 30.0
+
+    # ── dedup por TRILHA — o que o dono pediu ────────────────────────────────
+    # "a mesma pessoa nao pode gerar 5 alertas em 1 minuto; se entrou outra
+    #  pessoa, ai sim". Contar classes aproxima isso; a trilha responde.
+
+    def t(*pares):
+        """(classe, track_id) -> deteccoes com trilha."""
+        return [{"class": c, "track_id": i, "confidence": 0.9} for c, i in pares]
+
+    # 9) MESMA pessoa, muitos quadros, dentro do cooldown: UM evento.
+    p9 = novo_pub()
+    assert p9._deve_publicar("cam", t((SP, 7)), 9000.0) is True
+    for k in range(1, 10):                       # 9 quadros seguintes
+        assert p9._deve_publicar("cam", t((SP, 7)), 9000.0 + k * 2.0) is False
+    # era exatamente este o relato: 5 disparos em menos de 1 minuto.
+
+    # 10) Pessoa NOVA entra: evento na hora (respeitado o piso).
+    p10 = novo_pub()
+    assert p10._deve_publicar("cam", t((SP, 1)), 10000.0) is True
+    assert p10._deve_publicar("cam", t((SP, 1), (SP, 2)), 10011.0) is True
+    #     e a mesma dupla não repete
+    assert p10._deve_publicar("cam", t((SP, 1), (SP, 2)), 10022.0) is False
+
+    # 11) OSCILAÇÃO de detecção não vira evento: a trilha 1 some e volta.
+    p11 = novo_pub()
+    assert p11._deve_publicar("cam", t((SP, 1), (SP, 2)), 11000.0) is True
+    assert p11._deve_publicar("cam", t((SP, 2)), 11011.0) is False       # sumiu
+    assert p11._deve_publicar("cam", t((SP, 1), (SP, 2)), 11022.0) is False  # voltou
+
+    # 12) Revalidação: passado o cooldown, a mesma pessoa vale de novo — é o
+    #     "valida de novo depois de um tempo se a cena não mudou".
+    p12 = novo_pub()
+    assert p12._deve_publicar("cam", t((SP, 3)), 12000.0) is True
+    assert p12._deve_publicar("cam", t((SP, 3)), 12031.0) is True
+
+    # 13) CLASSE nova na mesma pessoa é notícia (tirou a luva sem tirar a máscara).
+    p13 = novo_pub()
+    assert p13._deve_publicar("cam", t((SP, 4)), 13000.0) is True
+    assert p13._deve_publicar("cam", t((SP, 4), (SL, 4)), 13011.0) is True
+
+    # 14) Piso vale igual: nascimento de trilha oscila no primeiro segundo.
+    p14 = novo_pub()
+    assert p14._deve_publicar("cam", t((SP, 5)), 14000.0) is True
+    assert p14._deve_publicar("cam", t((SP, 5), (SP, 6)), 14000.5) is False
+
+    # 15) Sem track_id, tudo segue pela contagem — dump da GIE não regride.
+    p15 = novo_pub()
+    assert p15._deve_publicar("cam", d(SP), 15000.0) is True
+    assert p15._deve_publicar("cam", d(SP), 15011.0) is False
+
+    # 16) O parser lê os DOIS formatos, e só o do tracker traz `track_id`.
+    gie = "Sem_protetor_de_ouvido 0.0 0 0.0 10 20 60 80 " + "0.0 " * 7 + "0.83"
+    trk = "Sem_protetor_de_ouvido 42 0.0 0 0.0 10 20 60 80 " + "0.0 " * 7 + "0.83"
+    a, = parse_kitti(gie)
+    b, = parse_kitti(trk)
+    assert "track_id" not in a and a["bbox"] == [10.0, 20.0, 50.0, 60.0], a
+    assert b["track_id"] == 42 and b["bbox"] == a["bbox"], b
+    assert b["confidence"] == a["confidence"] == 0.83
 
     print("autoteste OK")
     return 0
