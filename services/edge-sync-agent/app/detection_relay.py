@@ -29,6 +29,14 @@ pronta. Sem isso todo alerta do box nascia com `evidence_r2_key` NULL e o
 operador abria a tela sem frame para julgar. A captura é best-effort com teto
 e pausa (ver abaixo): evidência é desejável, o alerta é obrigatório.
 
+GUARDA DE PESSOA (medido em 2026-09-09): 15% dos alertas da RVB nasciam de
+cena VAZIA — o modelo servido não tem classe `person`, então só o pixel
+responde "tem gente?". O mesmo frame de evidência que este loop já captura é
+submetido ao `GuardaPessoa` antes do enqueue. Padrão SOMBRA: nada é barrado, o
+veredito vai no payload e o alerta sobe com a imagem, que é como o falso
+negativo fica auditável. Sem frame (abaixo do piso, teto estourado, pausa) ou
+sem detector -> publica. Ver app/guarda_pessoa.py para os números e o risco.
+
 Opt-in: `EDGE_REDIS_URL` unset → loop not built (see
 build_detection_relay_from_env). Transport errors propagate out of `run()`:
 main._supervise restarts the loop with backoff and a fresh pubsub — no
@@ -44,6 +52,7 @@ import threading
 import time
 from typing import Any, Callable
 
+from .guarda_pessoa import GuardaPessoa, build_guarda_pessoa_from_env
 from .sqlite_buffer import SQLiteBuffer
 
 logger = logging.getLogger(__name__)
@@ -96,6 +105,7 @@ class DetectionRelay:
         evidence_capture: "Callable[[str], str | None] | None" = None,
         max_evidence_per_min: int = _DEFAULT_MAX_EVIDENCE_PER_MIN,
         piso_evidencia: float = _DEFAULT_PISO_EVIDENCIA,
+        guarda: "GuardaPessoa | None" = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._buffer = buffer
@@ -106,6 +116,8 @@ class DetectionRelay:
         self._evidence_capture = evidence_capture
         self._max_evidence_per_min = max_evidence_per_min
         self._piso_evidencia = piso_evidencia
+        # None = sem guarda: todo evento de violação sobe, como antes.
+        self._guarda = guarda
         self._clock = clock
         self._janela_inicio = clock()
         self._na_janela = 0
@@ -133,31 +145,35 @@ class DetectionRelay:
             default=0.0,
         )
 
-    def _evidencia(self, camera_id: str) -> "str | None":
-        """Chave R2 do frame do evento, ou None. NUNCA levanta.
+    def _evidencia(self, camera_id: str) -> "tuple[str | None, bytes | None]":
+        """`(chave R2, JPEG)` do frame do evento. NUNCA levanta.
+
+        O JPEG volta porque é dele que o `GuardaPessoa` precisa — é o MESMO
+        quadro, sem uma segunda ida ao gravador. Um `(None, jpeg)` (upload
+        falhou, frame bom) ainda serve ao guarda.
 
         Degradação para o lado seguro (R2 fora, gravador mudo, teto estourado):
         o evento segue para o buffer sem evidência. Alerta sem imagem é ruim;
         alerta que não chega é pior.
         """
         if self._evidence_capture is None:
-            return None
+            return None, None
         if self._clock() < self._pausa_ate:
-            return None
+            return None, None
         if not self._dentro_do_teto():
             logger.warning(
                 "detection_relay_evidencia_no_teto camera=%s max=%d/min — evento "
                 "segue sem imagem",
                 camera_id, self._max_evidence_per_min,
             )
-            return None
+            return None, None
         try:
-            chave = self._evidence_capture(camera_id)
+            chave, frame = self._evidence_capture(camera_id)
         except Exception:  # noqa: BLE001 — evidência nunca bloqueia o alerta
             logger.warning(
                 "detection_relay_evidencia_falhou camera=%s", camera_id, exc_info=True
             )
-            chave = None
+            chave, frame = None, None
         if not chave:
             self._pausa_ate = self._clock() + _PAUSA_APOS_FALHA_S
             logger.warning(
@@ -165,8 +181,7 @@ class DetectionRelay:
                 "os eventos continuam subindo, sem imagem",
                 _PAUSA_APOS_FALHA_S, camera_id,
             )
-            return None
-        return chave
+        return chave, frame
 
     def handle(self, channel: Any, data: Any) -> int | None:
         """One bus message → buffer row id, or None when dropped."""
@@ -189,9 +204,19 @@ class DetectionRelay:
         # cota jogada fora — foi o que deixou 73 de 75 alertas sem frame.
         # ⛔ Não filtra o EVENTO: ele sobe de qualquer jeito, só sem imagem.
         confianca = self._confianca_maxima(payload)
-        evidencia = self._evidencia(camera_id) if confianca >= self._piso_evidencia else None
+        acima_do_piso = confianca >= self._piso_evidencia
+        evidencia, frame = self._evidencia(camera_id) if acima_do_piso else (None, None)
         if evidencia:
             payload["evidence_r2_key"] = evidencia
+        # Cena sem gente não vira alerta — mas SÓ quando houve frame para olhar.
+        # Sem frame o guarda não opina e o evento sobe: a violação que ninguém
+        # viu é pior que o alerta a mais (app/guarda_pessoa.py).
+        if (
+            self._guarda is not None
+            and frame is not None
+            and not self._guarda.julgar(camera_id, payload, frame)
+        ):
+            return None
         return self._buffer.enqueue(_EVENT_TYPE, camera_id, payload)
 
     def run(self, stop_event: threading.Event) -> None:
@@ -217,8 +242,12 @@ def build_detection_relay_from_env(
     """`EDGE_REDIS_URL` set → relay on the local Redis; unset → None (off).
 
     *evidence_capture* — normalmente `SnapshotExecutor.capture_evidence`
-    (main.py). Ausente, o relay volta ao comportamento anterior: evento sem
-    imagem. Teto por `EDGE_MAX_EVIDENCE_PER_MIN` (0 desliga a captura).
+    (main.py), que devolve `(chave R2, JPEG)`. Ausente, o relay volta ao
+    comportamento anterior: evento sem imagem. Teto por
+    `EDGE_MAX_EVIDENCE_PER_MIN` (0 desliga a captura).
+
+    O guarda de pessoa sai de `EDGE_GUARDA_PESSOA` (off | sombra | barrar,
+    padrão sombra). Sem modelo ou desligado -> None, e todo evento sobe.
     """
     source = env if env is not None else os.environ
     url = source.get("EDGE_REDIS_URL", "").strip()
@@ -246,4 +275,5 @@ def build_detection_relay_from_env(
         evidence_capture=evidence_capture,
         piso_evidencia=piso,
         max_evidence_per_min=teto,
+        guarda=build_guarda_pessoa_from_env(source),
     )
