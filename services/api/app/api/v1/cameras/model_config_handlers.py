@@ -96,6 +96,28 @@ def _notify_model_change(camera_id: str) -> None:
         logger.warning("model_config_notify_failed: camera=%s err=%s", camera_id, exc)
 
 
+def _agendar_digest_do_modelo(model_id: str) -> None:
+    """Enfileira o cálculo do SHA-256 do ONNX (config/poll do edge depende dele).
+
+    Apontar um modelo a uma câmera é o momento em que o box precisa passar a
+    conhecer aquele artefato. O manifesto que o config/poll manda ao edge só
+    sai com digest REAL (`trained_models.metrics.onnx_sha256`); sem esta
+    chamada o digest nunca existiria e o modelo nunca chegaria ao box.
+
+    Best-effort, como `_notify_model_change`: broker fora do ar não pode
+    derrubar o deploy — a task é idempotente e um novo deploy a reenfileira.
+    """
+    try:
+        from app.infrastructure.queue.tasks.model_validation import (  # noqa: PLC0415
+            record_onnx_digest,
+        )
+        record_onnx_digest.delay(str(model_id))
+    except Exception as exc:
+        logger.warning(
+            "model_config_digest_enqueue_failed: model=%s err=%s", model_id, exc
+        )
+
+
 @jwt_required()
 def list_camera_model_configs():  # type: ignore[no-untyped-def]
     """GET /api/cameras/model-config?module=epi — todos os deployments ativos.
@@ -213,6 +235,7 @@ def post_camera_model_config(camera_id: str):  # type: ignore[no-untyped-def]
         })
 
         _notify_model_change(camera_id)
+        _agendar_digest_do_modelo(str(model_uuid))
         logger.info(
             "camera_model_config_deployed: camera=%s module=%s model=%s",
             camera_id, module_code, model_id,
@@ -291,6 +314,7 @@ def post_camera_model_config_rollback(camera_id: str):  # type: ignore[no-untype
         })
 
         _notify_model_change(camera_id)
+        _agendar_digest_do_modelo(str(target["model_id"]))
         logger.info(
             "camera_model_config_rolled_back: camera=%s from_deployment=%s",
             camera_id, deployment_id,

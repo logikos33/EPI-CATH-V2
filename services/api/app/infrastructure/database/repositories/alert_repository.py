@@ -188,12 +188,20 @@ class AlertRepository(BaseRepository):
         tenant_id: Optional[str] = None,
         module_code: Optional[str] = None,
         timestamp: Optional[datetime] = None,
+        site_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Cria alerta de violação.
 
         tenant_id/module_code são opcionais (retrocompat — ajuste #8): quando
         fornecidos pelo caller (derivados da câmera), o alerta nasce
         tenant-scoped; omitidos, as colunas usam os defaults do schema.
+
+        `site_id` (coluna da migration 067) é OPCIONAL pelo mesmo motivo: os
+        callers que rodam no worker (`_save_alert`, ao vivo e retroativo) não
+        sabem o site — a câmera pode nem ter um. Quem sabe é o ingest do edge,
+        que recebe o site no device token. Foi por não existir NENHUM caller
+        que o soubesse que `alerts.site_id` estava NULL em 100% das linhas
+        desde que a coluna nasceu.
 
         `timestamp` (inferência retroativa — inference.py `_save_alert`):
         hora REAL da captura do frame de origem, em vez do DEFAULT NOW() do
@@ -218,6 +226,10 @@ class AlertRepository(BaseRepository):
             columns.append("timestamp")
             placeholders.append("%s")
             values.append(timestamp)
+        if site_id is not None:
+            columns.append("site_id")
+            placeholders.append("%s")
+            values.append(str(site_id))
 
         return self._execute_mutation(
             f"INSERT INTO alerts ({', '.join(columns)}) "  # noqa: S608

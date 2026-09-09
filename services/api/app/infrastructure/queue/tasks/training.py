@@ -313,6 +313,44 @@ def _resolve_display_name(existing_display_name: str | None, auto_generated: str
     return existing_display_name if existing_display_name else auto_generated
 
 
+def _classes_para_metrics(repo, dataset_version_id: str | None) -> dict[str, Any]:
+    """Classes treinadas, prontas pra entrar em `trained_models.metrics`.
+
+    POR QUE existe: até aqui o registro nascia SEM classe nenhuma. Os 4
+    modelos mais recentes do DEV (2ea8eb62, 1deadfb0, b9243540, 6ca25ee9) só
+    têm `map50` agregado — descobrir o que cada um detecta exigiu caçar o
+    `dataset_version_id` e ler `class_distribution` à mão. Pior: o NOME não
+    serve de atalho. `6ca25ee9` se chama "5 classes", tem mesmo 5, e todas
+    são de PRESENÇA — ele é incapaz de acusar violação, apesar do melhor
+    mAP50 do acervo. Sem a lista gravada no nascimento, quase ligamos em
+    produção um modelo que não geraria um único alerta.
+
+    Aditivo: devolve `{}` (nada a acrescentar) sempre que não houver fato
+    registrado — nunca inventa lista, nunca deriva do nome, nunca substitui
+    chave que o provider já tenha mandado.
+    """
+    if not dataset_version_id:
+        return {}
+    try:
+        dsv = repo._execute_one(
+            "SELECT class_distribution FROM dataset_versions WHERE id = %s",
+            (str(dataset_version_id),),
+        )
+        classes = _classes_treinadas((dsv or {}).get("class_distribution"))
+    except Exception as exc:  # noqa: BLE001 — nunca derruba o registro do treino
+        logger.warning(
+            "classes_para_metrics_falhou: dataset_version=%s err=%s",
+            dataset_version_id, exc,
+        )
+        return {}
+    if not classes:
+        return {}
+    return {
+        "classes": sorted(classes),
+        "classes_origem": "dataset_versions.class_distribution",
+    }
+
+
 def _fetch_scope_info(repo, dataset_version_id: str) -> tuple[str, str | None]:
     """(module_code, escopo) do nome comercial, lidos do dataset_version que
     originou o treino (`dataset_versions.module_code`/`class_distribution`).
@@ -547,6 +585,15 @@ def dispatch_training(
             # campo JSON já existente, sem migration nova) carrega o marcador
             # {'simulated': true, ...} pra artefatos simulados — indelével,
             # sobrevive independente de qualquer futura mudança em `origin`.
+            # Registro nasce COMPLETO: sem isto o modelo entra no acervo sem
+            # nenhuma classe registrada (ver _classes_para_metrics). Só
+            # ACRESCENTA — chave que o provider já mandou vence, e o dict do
+            # provider não é mutado (`metrics` ainda é o que vai pro
+            # update_job no fim da função).
+            metrics_registro = {
+                **_classes_para_metrics(repo, dataset_version_id),
+                **metrics,
+            }
             repo._execute_mutation_no_return(
                 """INSERT INTO trained_models
                    (id, user_id, job_id, name, display_name, model_path,
@@ -569,7 +616,7 @@ def dispatch_training(
                     origin,
                     r2_onnx_key,
                     dataset_version_id,
-                    json.dumps(metrics),
+                    json.dumps(metrics_registro),
                     job_id,
                 ),
             )

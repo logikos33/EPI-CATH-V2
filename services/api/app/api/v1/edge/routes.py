@@ -48,6 +48,13 @@ from app.infrastructure.database.repositories.edge_site_repository import (
 from app.infrastructure.database.repositories.edge_software_channel_repository import (
     EdgeSoftwareChannelRepository,
 )
+from app.infrastructure.database.repositories.model_deployment_repository import (
+    ModelDeploymentRepository,
+)
+from app.infrastructure.database.repositories.module_repository import ModuleRepository
+from app.infrastructure.database.repositories.operation_repository import (
+    OperationRepository,
+)
 from app.core.rate_limiting import get_ip_identifier
 from app.extensions import limiter
 from app.infrastructure.database.repositories.frame_repository import FrameRepository
@@ -62,6 +69,11 @@ _VALID_SITE_STATUSES = {"active", "inactive", "maintenance", "provisioning"}
 # WS7: gate por permissão — default_roles de edge:manage == {admin, superadmin}
 # (idêntico ao _ADMIN_ROLES inline anterior; paridade coberta por teste)
 _MANAGE_PERMISSION = "edge:manage"
+
+# TTL da URL assinada do modelo no config/poll: folgado o bastante para o box
+# baixar um ONNX de centenas de MB num link ruim, e ainda assim expirar bem
+# antes do próximo ciclo de vida do modelo.
+_MODEL_URL_TTL_SECONDS = 3 * 3600     # 3 h
 
 _DEFAULT_WINDOW_SECONDS = 24 * 3600   # 24 h
 _MAX_WINDOW_SECONDS = 7 * 24 * 3600   # 7 d
@@ -253,8 +265,9 @@ def _log_config_divergence_if_any(
     if not config_version_applied:
         return
     try:
-        cameras_now = _get_camera_repo().list_for_site_config(site_id, tenant_id)
-        current_version = _compute_config_version(cameras_now)
+        payload_now = _build_edge_config_payload(site_id, tenant_id)
+        current_version = _compute_config_version(payload_now)
+        cameras_now = payload_now["cameras"]
         chave = (site_id, device_id)
         agora = time.monotonic()
 
@@ -318,6 +331,44 @@ def _log_config_divergence_if_any(
 def _get_site_repo() -> EdgeSiteRepository:
     pool = DatabasePool.get_instance()
     return EdgeSiteRepository(pool)  # type: ignore[arg-type]
+
+
+def _get_operation_repo() -> OperationRepository:
+    return OperationRepository(DatabasePool.get_instance())
+
+
+def _get_module_repo() -> ModuleRepository:
+    return ModuleRepository(DatabasePool.get_instance())
+
+
+def _get_deployment_repo() -> ModelDeploymentRepository:
+    return ModelDeploymentRepository(DatabasePool.get_instance())
+
+
+def _assinar_url_do_modelo(payload: dict, tenant_id: str) -> None:
+    """Troca `model.r2_key` por `model.url` (presigned GET) no payload servido.
+
+    Feito DEPOIS do hash e do 304: a assinatura muda a cada chamada e, dentro
+    do hash, faria o config_version mudar em todo poll — 200 eterno, download
+    de modelo em loop. Falha de storage não derruba o poll: o manifesto sai do
+    payload (e o agente não toca no estado do modelo) em vez de o box ficar
+    sem câmera nenhuma por causa do R2.
+    """
+    model = payload.get("model")
+    if not model:
+        return
+    key = model.pop("r2_key", None)
+    try:
+        from app.infrastructure.storage.local_storage import get_storage
+        model["url"] = get_storage(tenant_id).generate_presigned_download_url(
+            key, ttl=_MODEL_URL_TTL_SECONDS
+        )
+    except Exception as exc:
+        logger.warning(
+            "edge_config_model_url_falhou: key=%s err=%s — manifesto omitido",
+            key, exc,
+        )
+        payload.pop("model", None)
 
 
 def _get_camera_repo() -> CameraRepository:
@@ -561,15 +612,150 @@ def ingest_heartbeat() -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def _compute_config_version(cameras: list[dict]) -> str:
-    """Hash de conteúdo do payload de câmeras — mesma fórmula usada pelo
-    ETag/config_version de `poll_edge_config` e reusada por
-    `ingest_heartbeat` (ADR-0058) para comparar contra o
-    `config_version_applied` que o device reporta e logar divergência.
-    Extraído para função para as duas rotas nunca discordarem sobre o hash
-    de um MESMO conjunto de câmeras.
+def _build_edge_config_payload(site_id: str, tenant_id: str) -> dict:
+    """Monta o payload INTEIRO que o site do device deve estar rodando.
+
+    Chaves de PRIMEIRO NÍVEL, exatamente as que o `ConfigPoller` do
+    edge-sync-agent aplica parcialmente (`config_poller.py::_apply`):
+
+      cameras  — inventário de câmeras do site (com `is_active`)
+      rules    — operações das câmeras do site (o que a tela de Cenário grava)
+      scenario — módulos habilitados do tenant + catálogo de classes
+      model    — manifesto do modelo ativo, SÓ quando há digest real
+
+    `model` sai com `r2_key` (estável) e não com a URL assinada: a assinatura
+    muda a cada geração e entraria no hash, quebrando o 304 em TODO poll. Quem
+    serve o 200 (`poll_edge_config`) troca `r2_key` pela URL na saída.
+
+    ponytail: 4 consultas por chamada, e `_log_config_divergence_if_any` chama
+    isto a cada heartbeat com `config_version_applied`. Índices cobrem as 4;
+    se a frota crescer a ponto de doer, o caminho é cachear o payload por
+    (site, versão) em Redis — não recortar o que é enviado.
     """
-    canonical = json.dumps({"cameras": cameras}, sort_keys=True, default=str)
+    cameras = _get_camera_repo().list_for_site_config(site_id, tenant_id)
+    for cam in cameras:
+        cam["id"] = str(cam["id"])
+
+    rules = _get_operation_repo().list_for_site_config(site_id, tenant_id)
+    for rule in rules:
+        rule["camera_id"] = str(rule["camera_id"])
+
+    payload: dict = {
+        "cameras": cameras,
+        "rules": rules,
+        "scenario": _build_scenario(tenant_id),
+    }
+    model = _build_model_manifest(site_id, tenant_id)
+    if model is not None:
+        payload["model"] = model
+    return payload
+
+
+def _build_scenario(tenant_id: str) -> dict:
+    """Módulos habilitados do tenant + classes de cada um.
+
+    É a parte do cenário que NÃO está nas regras: habilitar/desabilitar um
+    módulo e criar/desativar classe no Estúdio são mudanças de front que hoje
+    nunca chegavam ao box.
+    """
+    mod_repo = _get_module_repo()
+    modules = []
+    for tm in mod_repo.get_by_tenant(str(tenant_id)):
+        if not tm.get("enabled"):
+            continue
+        module_code = str(tm["module_code"])
+        modules.append({
+            "module_code": module_code,
+            "classes": [
+                {
+                    "class_id": c["class_id"],
+                    "class_name": c["class_name"],
+                    "display_name": c.get("display_name"),
+                    "is_violation": bool(c.get("is_violation")),
+                    "is_active": bool(c.get("is_active", True)),
+                }
+                for c in mod_repo.get_classes(module_code)
+            ],
+        })
+    modules.sort(key=lambda m: m["module_code"])
+    return {"modules": modules}
+
+
+def _build_model_manifest(site_id: str, tenant_id: str) -> "dict | None":
+    """Manifesto do modelo ativo do site — ou None, sem inventar nada.
+
+    ⚠️ O digest é OBRIGATÓRIO e tem de ser REAL. `ModelManifest.sha256` é o que
+    o agente usa para decidir se já tem o modelo e (quando
+    `model_manager.download_and_swap` existir) para conferir o download. Não
+    existe coluna de digest no registry: a fonte é
+    `trained_models.metrics.onnx_sha256`, gravado pela task
+    `tasks.model_validation.record_onnx_digest`. Sem digest gravado → NENHUM
+    `model` no payload (o apply parcial do agente não toca o estado) + uma
+    linha de log dizendo qual modelo ficou de fora. Preencher esse campo com um hash de
+    identidade (id + chave R2) seria plantar uma armadilha: pareceria um
+    digest e reprovaria todo download no dia em que alguém o conferisse.
+
+    O contrato do consumidor tem UM manifesto por box, não um por câmera. Se as
+    câmeras do site apontam para modelos DIFERENTES, não há como dizer isso
+    neste formato — omitimos e avisamos, em vez de eleger um e mandar o modelo
+    errado para o resto das câmeras.
+    """
+    deployments = _get_deployment_repo().list_active_for_site(site_id, tenant_id)
+    if not deployments:
+        return None
+
+    distintos: dict[str, dict] = {}
+    sem_digest: list[str] = []
+    for dep in deployments:
+        metrics = dep.get("metrics") or {}
+        if isinstance(metrics, str):
+            try:
+                metrics = json.loads(metrics)
+            except ValueError:
+                metrics = {}
+        sha256 = (metrics or {}).get("onnx_sha256")
+        r2_key = dep.get("r2_onnx_key")
+        if not sha256 or not r2_key:
+            sem_digest.append(str(dep.get("model_id")))
+            continue
+        distintos[str(sha256)] = {
+            "sha256": str(sha256),
+            "r2_key": str(r2_key),
+            "engine_type": "onnx",
+        }
+
+    if sem_digest:
+        # INFO e não WARNING: é um ESTADO contínuo (fica assim até o digest ser
+        # gravado), e `_log_config_divergence_if_any` monta este mesmo payload a
+        # cada heartbeat — em WARNING viraria uma linha de alarme por minuto,
+        # por device, para uma condição que não mudou.
+        logger.info(
+            "edge_config_model_sem_digest: site=%s modelos=%s — manifesto "
+            "omitido (metrics.onnx_sha256 ausente; roda record_onnx_digest)",
+            str(site_id)[:8], sorted(set(sem_digest)),
+        )
+    if len(distintos) != 1:
+        if len(distintos) > 1:
+            logger.warning(
+                "edge_config_model_ambiguo: site=%s modelos_distintos=%d — "
+                "manifesto omitido (contrato do agente tem 1 modelo por box)",
+                str(site_id)[:8], len(distintos),
+            )
+        return None
+    return next(iter(distintos.values()))
+
+
+def _compute_config_version(payload: dict) -> str:
+    """Hash de conteúdo do payload INTEIRO — ETag/config_version de
+    `poll_edge_config`, reusado por `ingest_heartbeat` (ADR-0058) para comparar
+    contra o `config_version_applied` que o device reporta.
+
+    Cobre payload inteiro, não só `cameras`: enquanto derivava só das câmeras,
+    mudar o cenário deixava a versão igual, o device recebia 304 e NUNCA
+    aplicava a mudança — o jeito mais fácil de a promessa "salvar propaga ao
+    box" continuar mentindo mesmo com o cenário já no payload.
+    """
+    canonical = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
@@ -580,8 +766,11 @@ def poll_edge_config() -> tuple:
 
     CONTRATO DO CONSUMIDOR: o ConfigPoller aplica chaves de PRIMEIRO NÍVEL do
     body ({cameras, rules, scenario, model} — apply parcial), por isso esta
-    rota NÃO usa o envelope success()/data. Devolver apenas {"cameras": [...]}
-    é seguro: chaves ausentes não são tocadas no estado do agente.
+    rota NÃO usa o envelope success()/data. Chave ausente não é tocada no
+    estado do agente — por isso `model` só aparece quando há digest real.
+
+    As quatro chaves saem daqui (antes só `cameras` saía, e a tela de Cenário
+    prometia ao operador uma propagação que nunca acontecia).
 
     Segurança: exige escopo config:read (S1); escopo site/tenant vem do
     enrollment do device (C-01); o SELECT é enxuto e NUNCA inclui
@@ -594,15 +783,12 @@ def poll_edge_config() -> tuple:
     """
     tenant_id, site_id, device_id = g.device_ctx
     try:
-        cameras = _get_camera_repo().list_for_site_config(site_id, tenant_id)
-        for cam in cameras:
-            cam["id"] = str(cam["id"])
+        payload = _build_edge_config_payload(site_id, tenant_id)
 
         # F1 — versionamento por conteúdo: config_version + ETag derivados do
         # payload (sem migration). Device manda If-None-Match; se nada mudou →
         # 304 (o caso comum; evita 28 câmeras × poll × payload grande).
-        payload = {"cameras": cameras}
-        config_version = _compute_config_version(cameras)
+        config_version = _compute_config_version(payload)
         etag = f'"{config_version}"'
 
         if request.headers.get("If-None-Match") == etag:
@@ -616,9 +802,14 @@ def poll_edge_config() -> tuple:
             return resp
 
         payload["config_version"] = config_version
+        _assinar_url_do_modelo(payload, tenant_id)
         logger.info(
-            "edge_config_poll: 200 device=%s site=%s cameras=%d v=%s",
-            device_id, site_id[:8], len(cameras), config_version,
+            "edge_config_poll: 200 device=%s site=%s cameras=%d regras=%d "
+            "modelo=%s v=%s",
+            device_id, site_id[:8], len(payload["cameras"]),
+            len(payload["rules"]),
+            payload.get("model", {}).get("sha256", "-")[:12],
+            config_version,
         )
         resp = make_response(jsonify(payload), 200)
         resp.headers["ETag"] = etag

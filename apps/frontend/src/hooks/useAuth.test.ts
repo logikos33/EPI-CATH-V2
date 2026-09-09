@@ -21,7 +21,7 @@ import { renovarSessao } from './useAuth'
 
 const fetchDublê = vi.fn()
 
-/** jsdom deste projeto não traz `localStorage` — mesmo dublê dos outros testes. */
+/** jsdom deste projeto não traz `sessionStorage` — mesmo dublê dos outros testes. */
 class MemoriaStorage implements Storage {
   private mapa = new Map<string, string>()
   get length(): number { return this.mapa.size }
@@ -42,8 +42,8 @@ const resposta = (body: unknown, status = 200) => ({
 const EXP_SEG = 1_800_000_000
 
 beforeEach(() => {
-  vi.stubGlobal('localStorage', new MemoriaStorage())
-  localStorage.setItem(TOKEN_KEY, 'token-velho')
+  vi.stubGlobal('sessionStorage', new MemoriaStorage())
+  sessionStorage.setItem(TOKEN_KEY, 'token-velho')
   fetchDublê.mockReset()
   vi.stubGlobal('fetch', fetchDublê)
 })
@@ -71,11 +71,11 @@ describe('renovarSessao', () => {
     // Leva o token ATUAL: é ele que o backend troca (não há refresh token).
     expect(init.headers.Authorization).toBe('Bearer token-velho')
 
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('token-novo')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('token-novo')
     expect(prazo).toBe(EXP_SEG * 1000)
     // Papel/permissões vêm relidos do banco: guardar o user novo é o que faz
     // um rebaixamento valer sem esperar o próximo login.
-    expect(JSON.parse(localStorage.getItem('user') || '{}').email).toBe('op@rvb.com')
+    expect(JSON.parse(sessionStorage.getItem('user') || '{}').email).toBe('op@rvb.com')
   })
 
   it('401 do JWT não troca o token guardado', async () => {
@@ -87,7 +87,7 @@ describe('renovarSessao', () => {
     )
 
     await expect(renovarSessao()).rejects.toThrow()
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('token-velho')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('token-velho')
   })
 
   it('403 de sessão temporária chega com a mensagem do servidor', async () => {
@@ -103,7 +103,7 @@ describe('renovarSessao', () => {
     )
 
     await expect(renovarSessao()).rejects.toThrow(/temporária/i)
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('token-velho')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('token-velho')
   })
 
   it('resposta sem prazo não substitui o token', async () => {
@@ -115,6 +115,6 @@ describe('renovarSessao', () => {
     )
 
     await expect(renovarSessao()).rejects.toThrow()
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('token-velho')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('token-velho')
   })
 })

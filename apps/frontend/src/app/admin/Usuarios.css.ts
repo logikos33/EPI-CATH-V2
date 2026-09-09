@@ -76,6 +76,7 @@ export const botaoSecundario = style({
   fontSize: '12px',
   fontWeight: 600,
   cursor: 'pointer',
+  whiteSpace: 'nowrap',
   selectors: { '&:disabled': { opacity: 0.6, cursor: 'default' } },
 })
 
@@ -143,6 +144,14 @@ export const tenantNome = style({
   fontFamily: lk.fonte.mono,
   fontSize: '10.5px',
   color: lk.cor.cinzaNevoa,
+  // O nome do tenant era o que estourava a largura ("RVB ISOLANTES PARA
+  // TRANSFORMADORES" quebrava em 3 linhas em toda linha da tabela e empurrava
+  // a coluna de ações para fora). Uma linha só, com reticências; o nome
+  // inteiro fica no `title` do elemento.
+  maxWidth: '200px',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
 })
 
 export const mono = style({ fontFamily: lk.fonte.mono, fontSize: '12px', color: lk.cor.cinzaNevoa })
@@ -162,6 +171,8 @@ export const acoes = style({
   display: 'flex',
   gap: '8px',
   justifyContent: 'flex-end',
+  alignItems: 'center',
+  whiteSpace: 'nowrap',
 })
 
 export const dot = style({
@@ -309,4 +320,33 @@ export const botaoRetry = style({
   fontSize: '13px',
   fontWeight: 700,
   cursor: 'pointer',
+})
+
+/** Nome clicável: mesma caixa do texto, para a linha não mudar de altura
+ *  ao entrar em edição. Editar aqui é o único caminho de renomear alguém que
+ *  já foi cadastrado — os 18 primeiros nasceram com o pedaço do e-mail. */
+export const nomeBotao = style({
+  background: 'none',
+  border: 'none',
+  padding: 0,
+  margin: 0,
+  color: 'inherit',
+  font: 'inherit',
+  textAlign: 'left',
+  cursor: 'text',
+  borderBottom: '1px dashed transparent',
+  selectors: {
+    '&:hover': { borderBottomColor: lk.cor.bordaForte },
+    '&:focus-visible': { outline: `2px solid ${lk.cor.cianoVisao}`, outlineOffset: '2px' },
+  },
+})
+
+export const nomeInput = style({
+  background: lk.cor.preto,
+  border: `1px solid ${lk.cor.cianoVisao}`,
+  borderRadius: lk.raio.s,
+  color: lk.cor.brancoSinal,
+  font: 'inherit',
+  padding: '2px 6px',
+  width: '180px',
 })

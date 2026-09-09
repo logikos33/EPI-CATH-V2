@@ -21,8 +21,9 @@ import { Navigate } from 'react-router-dom'
 
 import { useAuth } from '../hooks/useAuth'
 import { rotaHomeDoUsuario } from './RotasNovas'
+import { isInTenantContext } from '../services/tenantContext'
 
 export function RaizRotasNovas() {
   const { isSuperAdmin } = useAuth()
-  return <Navigate to={rotaHomeDoUsuario(isSuperAdmin)} replace />
+  return <Navigate to={rotaHomeDoUsuario(isSuperAdmin, isInTenantContext())} replace />
 }

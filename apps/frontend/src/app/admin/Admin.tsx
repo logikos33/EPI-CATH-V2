@@ -36,6 +36,7 @@ import { useAuth } from '../../hooks/useAuth'
 import { rotaHomeDoUsuario } from '../RotasNovas'
 import { SemPermissao } from '../shell/SemPermissao'
 import * as s from './Admin.css'
+import { isInTenantContext } from '../../services/tenantContext'
 
 const ITENS = [
   { rota: '', rotulo: 'Visão geral', Icone: LayoutDashboard },
@@ -51,7 +52,7 @@ export function Admin() {
 
   if (!can('admin:panel')) return <SemPermissao permissao="admin:panel" />
 
-  const home = rotaHomeDoUsuario(isSuperAdmin)
+  const home = rotaHomeDoUsuario(isSuperAdmin, isInTenantContext())
   const naPropriaHome = pathname === home
 
   return (

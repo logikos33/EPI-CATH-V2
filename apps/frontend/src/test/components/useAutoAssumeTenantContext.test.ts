@@ -17,7 +17,7 @@ import {
 import { useCrossTenantCamerasStore } from '../../services/crossTenantCameras'
 import { assumeTenantContext } from '../../services/tenantContext'
 
-// localStorage/sessionStorage reais são pouco confiáveis neste ambiente de
+// sessionStorage/sessionStorage reais são pouco confiáveis neste ambiente de
 // teste (mesmo motivo documentado em tenantContextExpiry.test.ts) —
 // substituídos por um Storage in-memory via vi.stubGlobal.
 class MemoryStorage implements Storage {
@@ -58,7 +58,7 @@ function setForeignTenants(...tenants: (typeof RVB)[]): void {
 describe('useAutoAssumeTenantContext', () => {
   beforeEach(() => {
     mockIsSuperAdmin = true
-    vi.stubGlobal('localStorage', new MemoryStorage())
+    vi.stubGlobal('sessionStorage', new MemoryStorage())
     vi.stubGlobal('sessionStorage', new MemoryStorage())
     useCrossTenantCamerasStore.setState({ cameras: {}, tenants: [] })
     vi.mocked(assumeTenantContext).mockClear()
@@ -85,7 +85,7 @@ describe('useAutoAssumeTenantContext', () => {
   })
 
   it('já em contexto assumido → NÃO chama assumeTenantContext', () => {
-    localStorage.setItem(
+    sessionStorage.setItem(
       'tenant_context',
       JSON.stringify({
         tenant_id: 'tenant-rvb',
@@ -103,7 +103,7 @@ describe('useAutoAssumeTenantContext', () => {
 
   it('em contexto ativo: limpa o guard do tenant assumido (permite auto-assume futuro se expirar)', () => {
     sessionStorage.setItem('auto_assume_attempt:tenant-rvb', String(Date.now()))
-    localStorage.setItem(
+    sessionStorage.setItem(
       'tenant_context',
       JSON.stringify({
         tenant_id: 'tenant-rvb',

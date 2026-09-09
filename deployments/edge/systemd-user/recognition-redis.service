@@ -1,0 +1,41 @@
+[Unit]
+# Redis LOCAL do box — barramento de detecções (ADR-0002), não banco.
+#
+# systemd --user (NÃO de sistema): o box do cliente não tem sudo livre; todas
+# as units do edge que rodam hoje (edge-sync-agent, edge-frame-collector,
+# edge-live-view, edge-monitoring-collector) são --user com Linger=yes. Ver
+# docs/edge/REGRAS_PLATAFORMA_JETSON.md §3.4.
+#
+# REUSE-FIRST: o binário JÁ EXISTE no box, compilado da fonte na task-113
+# (soak113), Redis 7.4.1 — não instala nada, não baixa nada, não precisa de
+# sudo. O que faltava era uma unit e uma config de produção (a do soak escuta
+# na 6390 e vive dentro de ~/soak113, que é diretório de experimento).
+Description=Recognition edge Redis (barramento det:{camera_id}, ADR-0002)
+After=network.target
+
+[Service]
+Type=simple
+# `dir` do redis-edge.conf não é setado; o Redis usa o cwd. Com save "" e
+# appendonly no ele não escreve nada ali — mas precisa existir e ser gravável.
+WorkingDirectory=%h/.local/state/recognition/redis
+ExecStartPre=/bin/mkdir -p %h/.local/state/recognition/redis
+ExecStart=%h/soak113/redis/src/redis-server %h/.config/recognition/redis-edge.conf
+Restart=always
+RestartSec=3
+
+# journald --user NÃO tem armazenamento neste box (/var/log/journal não
+# existe, `journalctl --user` devolve "No journal files were found"). Log em
+# arquivo é a ÚNICA evidência possível — mesmo padrão do drop-in que o
+# edge-frame-collector já usa.
+StandardOutput=append:%h/recognition/logs/redis.log
+StandardError=append:%h/recognition/logs/redis.log
+
+# Budget da tabela em deployments/edge/README.md (§Cap por serviço). Teto do
+# cgroup + maxmemory do redis-edge.conf = defesa em profundidade: o Redis é
+# buffer transitório e nunca pode disputar memória unificada com a inferência.
+MemoryHigh=512M
+MemoryMax=640M
+OOMScoreAdjust=500
+
+[Install]
+WantedBy=default.target

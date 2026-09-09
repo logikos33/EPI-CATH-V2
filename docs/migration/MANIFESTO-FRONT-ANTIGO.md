@@ -14,11 +14,11 @@ depois que a migração inteira estiver feita.
 | `SEM-DESENHO` | serve rota que o handoff não desenhou (Fase 0 §3.2) | ⛔ não — espera o design |
 | `INFRA` | não é tela (api, hooks, tipos, tema) | ⛔ caso a caso |
 
-## Situação — 393 arquivos, 66.924 linhas
+## Situação — 394 arquivos, 67.033 linhas
 
 | status | arquivos |
 |---|---:|
-| `INFRA` | 232 |
+| `INFRA` | 233 |
 | `PENDENTE` | 144 |
 | `SEM-DESENHO` | 7 |
 | `SUBSTITUIDA` | 6 |
@@ -41,7 +41,7 @@ apagado não são a mesma coisa.
 | arquivo | status | migrado para | linhas |
 |---|---|---|---:|
 | `src/App.tsx` | `INFRA` | — | 123 |
-| `src/AppRoutes.tsx` | `INFRA` | — | 262 |
+| `src/AppRoutes.tsx` | `INFRA` | — | 263 |
 | `src/components/annotation/AnnotationStudio.css.ts` | `INFRA` | — | 514 |
 | `src/components/annotation/AnnotationStudio.tsx` | `INFRA` | — | 1560 |
 | `src/components/annotation/boxGeometry.ts` | `INFRA` | — | 81 |
@@ -206,7 +206,7 @@ apagado não são a mesma coisa.
 | `src/components/ui/Tooltip/Tooltip.tsx` | `INFRA` | — | 29 |
 | `src/constants/epiClasses.ts` | `INFRA` | — | 29 |
 | `src/hooks/useAnimations.ts` | `INFRA` | — | 54 |
-| `src/hooks/useAuth.ts` | `INFRA` | — | 115 |
+| `src/hooks/useAuth.ts` | `INFRA` | — | 116 |
 | `src/hooks/useAutoAssumeTenantContext.ts` | `INFRA` | — | 101 |
 | `src/hooks/useCameraSnapshot.ts` | `INFRA` | — | 103 |
 | `src/hooks/useEdgeTelemetrySocket.ts` | `INFRA` | — | 74 |
@@ -223,7 +223,7 @@ apagado não são a mesma coisa.
 | `src/hooks/useTraining.ts` | `INFRA` | — | 95 |
 | `src/hooks/useTrainingSocket.ts` | `INFRA` | — | 127 |
 | `src/main.tsx` | `INFRA` | — | 21 |
-| `src/services/api.ts` | `INFRA` | — | 266 |
+| `src/services/api.ts` | `INFRA` | — | 269 |
 | `src/services/cameraService.ts` | `INFRA` | — | 269 |
 | `src/services/confidenceDisplay.ts` | `INFRA` | — | 59 |
 | `src/services/countingService.ts` | `INFRA` | — | 64 |
@@ -231,14 +231,15 @@ apagado não são a mesma coisa.
 | `src/services/dashboardEdgeService.ts` | `INFRA` | — | 103 |
 | `src/services/edgeService.ts` | `INFRA` | — | 197 |
 | `src/services/eventsService.ts` | `INFRA` | — | 167 |
-| `src/services/impersonation.ts` | `INFRA` | — | 100 |
+| `src/services/impersonation.ts` | `INFRA` | — | 101 |
 | `src/services/modelDisplay.ts` | `INFRA` | — | 79 |
 | `src/services/moduleService.ts` | `INFRA` | — | 54 |
 | `src/services/monitoringService.ts` | `INFRA` | — | 108 |
 | `src/services/propagationService.ts` | `INFRA` | — | 157 |
 | `src/services/reportService.ts` | `INFRA` | — | 34 |
 | `src/services/searchService.ts` | `INFRA` | — | 158 |
-| `src/services/tenantContext.ts` | `INFRA` | — | 276 |
+| `src/services/sessao.ts` | `INFRA` | — | 99 |
+| `src/services/tenantContext.ts` | `INFRA` | — | 278 |
 | `src/services/trainingService.ts` | `INFRA` | — | 58 |
 | `src/stores/appStore.ts` | `INFRA` | — | 49 |
 | `src/stores/cameraGridStore.ts` | `INFRA` | — | 132 |
@@ -300,7 +301,7 @@ apagado não são a mesma coisa.
 | `src/modules/admin/components/WorkerStatusBadge.tsx` | `PENDENTE` | — | 25 |
 | `src/modules/admin/constants/integrationCatalog.ts` | `PENDENTE` | — | 100 |
 | `src/modules/admin/hooks/useAdminDashboard.ts` | `PENDENTE` | — | 27 |
-| `src/modules/admin/hooks/useAdminWebSocket.ts` | `PENDENTE` | — | 51 |
+| `src/modules/admin/hooks/useAdminWebSocket.ts` | `PENDENTE` | — | 53 |
 | `src/modules/admin/hooks/usePermissions.ts` | `PENDENTE` | — | 41 |
 | `src/modules/admin/hooks/useWorkerMonitor.ts` | `PENDENTE` | — | 44 |
 | `src/modules/admin/pages/AdminAnnouncementsPage.tsx` | `PENDENTE` | — | 127 |
