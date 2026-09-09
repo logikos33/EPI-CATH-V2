@@ -102,6 +102,9 @@ def test_sombra_nao_barra_nada_mas_marca_o_payload(tmp_path):
     assert p["guarda_pessoa"] == {
         "veredito": "sem_pessoa", "confianca": 0.02, "modo": "sombra",
         "ms": p["guarda_pessoa"]["ms"],
+        # `None` e nao 0.0: este payload nao tem bbox nenhuma, entao nao houve o
+        # que conter. Zero seria "olhei e a caixa nao cai em ninguem".
+        "contencao": None, "pessoas": 0, "piso_contencao": 0.0,
     }
     assert g.resumo()["barrados"] == 0
     assert list(tmp_path.iterdir()) == [], "em sombra o frame já está no R2"
@@ -190,3 +193,177 @@ def test_modo_invalido_cai_em_sombra():
     desligar a medição."""
     assert GuardaPessoa(_Detector(_Resultado(True)), modo="barra").modo == MODO_SOMBRA
     assert MODO_OFF not in (MODO_SOMBRA, MODO_BARRAR)
+
+
+# ── contenção: esta caixa cai sobre alguém? ─────────────────────────────────
+#
+# O caso que trouxe estes testes (09/09, print do operador): alerta com a caixa
+# de violação sobre um PALETE no pátio, à direita, e a pessoa dentro do galpão,
+# à esquerda. O guarda de quadro APROVA — tem gente no quadro. A caixa continua
+# sendo alucinação. Só a contenção responde.
+
+
+@dataclass
+class _Caixa:
+    x: int
+    y: int
+    w: int
+    h: int
+    confidence: float = 0.9
+
+
+@dataclass
+class _ResultadoComCaixas:
+    found: bool
+    boxes: tuple = ()
+    undetermined: bool = False
+    max_confidence: float = 0.0
+
+
+def _jpeg(largura=1920, altura=1080) -> bytes:
+    """JPEG de verdade — a contenção lê o tamanho do quadro do cabeçalho."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (largura, altura), (30, 30, 30)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _payload_com_caixa(bbox, unidade="pixels_xywh_streammux", frame_wh=(1280, 720)):
+    det = {"class": "Sem protetor de ouvido", "confidence": 0.9, "bbox": list(bbox)}
+    if unidade:
+        det["bbox_unidade"] = unidade
+    if frame_wh:
+        det["frame_wh"] = list(frame_wh)
+    return {"camera_id": "cam-1", "has_violation": True, "detections": [det]}
+
+
+def test_caixa_sobre_o_palete_com_pessoa_no_quadro_tem_contencao_zero():
+    """O print do operador. Pessoa à esquerda (0-20% da largura), caixa a 75%."""
+    pessoa = _Caixa(x=100, y=300, w=280, h=600)  # dentro do galpão, à esquerda
+    g = _guarda(_ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.98))
+    # Caixa no streammux a x=960/1280 = 75% da largura: o palete, no pátio.
+    payload = _payload_com_caixa((960, 200, 60, 50))
+
+    assert g.julgar("cam-1", payload, _jpeg()) is True  # piso 0 = só mede
+    assert payload["guarda_pessoa"]["veredito"] == "com_pessoa"
+    assert payload["guarda_pessoa"]["contencao"] == 0.0
+    assert payload["detections"][0]["contencao"] == 0.0
+
+
+def test_caixa_sobre_a_pessoa_tem_contencao_alta():
+    """Mesma pessoa, caixa na cabeça dela — o alerta legítimo."""
+    pessoa = _Caixa(x=100, y=300, w=280, h=600)  # 5,2%..19,8% x, 27,8%..83,3% y
+    g = _guarda(_ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.98))
+    # 128/1280 = 10% x, 240/720 = 33,3% y — bem dentro da pessoa.
+    payload = _payload_com_caixa((128, 240, 40, 40))
+
+    assert g.julgar("cam-1", payload, _jpeg()) is True
+    assert payload["detections"][0]["contencao"] == 1.0
+
+
+def test_piso_de_contencao_barra_a_caixa_fora_da_pessoa():
+    pessoa = _Caixa(x=100, y=300, w=280, h=600)
+    g = _guarda(
+        _ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.98),
+        piso_contencao=0.30,
+    )
+    assert g.julgar("cam-1", _payload_com_caixa((960, 200, 60, 50)), _jpeg()) is False
+    r = g.resumo()
+    assert r["barrados_por_contencao"] == 1
+    assert r["contencao"]["0"] == 1
+
+
+def test_piso_de_contencao_nao_barra_a_caixa_sobre_a_pessoa():
+    pessoa = _Caixa(x=100, y=300, w=280, h=600)
+    g = _guarda(
+        _ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.98),
+        piso_contencao=0.30,
+    )
+    assert g.julgar("cam-1", _payload_com_caixa((128, 240, 40, 40)), _jpeg()) is True
+    assert g.resumo()["barrados_por_contencao"] == 0
+
+
+def test_sombra_nunca_barra_por_contencao_por_mais_zerada_que_esteja():
+    pessoa = _Caixa(x=100, y=300, w=280, h=600)
+    g = _guarda(
+        _ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.98),
+        modo=MODO_SOMBRA,
+        piso_contencao=0.90,
+    )
+    payload = _payload_com_caixa((960, 200, 60, 50))
+    assert g.julgar("cam-1", payload, _jpeg()) is True
+    assert payload["guarda_pessoa"]["contencao"] == 0.0  # marcado, não barrado
+
+
+def test_caixa_sem_frame_wh_e_inprojetavel_e_nao_barra():
+    """Sem a referência do streammux, chutar a resolução foi o bug do front."""
+    pessoa = _Caixa(x=100, y=300, w=280, h=600)
+    g = _guarda(
+        _ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.98),
+        piso_contencao=0.90,
+    )
+    payload = _payload_com_caixa((960, 200, 60, 50), frame_wh=None)
+    assert g.julgar("cam-1", payload, _jpeg()) is True
+    assert payload["guarda_pessoa"]["contencao"] is None
+    assert "contencao" not in payload["detections"][0]
+    assert g.resumo()["contencao_sem_projecao"] == 1
+
+
+def test_maximo_e_nao_media_entre_as_caixas_do_evento():
+    """Basta UMA caixa cair sobre alguém para o evento ser plausível."""
+    pessoa = _Caixa(x=100, y=300, w=280, h=600)
+    g = _guarda(
+        _ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.98),
+        piso_contencao=0.50,
+    )
+    payload = _payload_com_caixa((128, 240, 40, 40))
+    payload["detections"].append(
+        {
+            "class": "Sem luva",
+            "confidence": 0.7,
+            "bbox": [960, 200, 60, 50],  # essa cai no palete
+            "bbox_unidade": "pixels_xywh_streammux",
+            "frame_wh": [1280, 720],
+        }
+    )
+    assert g.julgar("cam-1", payload, _jpeg()) is True
+    assert payload["guarda_pessoa"]["contencao"] == 1.0
+    assert payload["detections"][1]["contencao"] == 0.0  # e a fraca fica marcada
+
+
+def test_pessoas_sobrepostas_nao_inflam_a_contencao_acima_de_um():
+    """União, não soma: duas pessoas sobrepostas contariam a interseção 2x."""
+    a = _Caixa(x=100, y=200, w=400, h=600)
+    b = _Caixa(x=200, y=250, w=400, h=600)
+    g = _guarda(_ResultadoComCaixas(found=True, boxes=(a, b), max_confidence=0.99))
+    payload = _payload_com_caixa((160, 200, 40, 40))  # 240..300 px, dentro das duas
+    g.julgar("cam-1", payload, _jpeg())
+    assert payload["detections"][0]["contencao"] == 1.0
+
+
+def test_quadro_vazio_deixa_toda_caixa_com_contencao_zero():
+    g = _guarda(_ResultadoComCaixas(found=False, boxes=()), piso_contencao=0.30)
+    payload = _payload_com_caixa((128, 240, 40, 40))
+    assert g.julgar("cam-1", payload, _jpeg()) is False
+    assert payload["detections"][0]["contencao"] == 0.0
+
+
+def test_indeterminado_nao_calcula_contencao_e_publica():
+    g = _guarda(_ResultadoComCaixas(found=False, undetermined=True), piso_contencao=0.99)
+    payload = _payload_com_caixa((960, 200, 60, 50))
+    assert g.julgar("cam-1", payload, _jpeg()) is True
+    assert payload["guarda_pessoa"]["contencao"] is None
+
+
+@pytest.mark.parametrize(
+    "raw,esperado",
+    [("", 0.0), ("0.3", 0.3), ("1", 1.0), ("1.5", 0.0), ("-0.2", 0.0), ("meio", 0.0)],
+)
+def test_piso_invalido_cai_em_so_mede_nunca_em_barra_mais(raw, esperado):
+    """Erro de digitação de quem liga o gate não pode virar violação muda."""
+    from app.guarda_pessoa import _parse_piso
+
+    assert _parse_piso(raw) == esperado
