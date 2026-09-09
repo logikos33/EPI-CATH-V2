@@ -9,6 +9,7 @@ List, filter, export, and acknowledge alerts from violation detection.
 | `/api/alerts` | GET | List alerts with pagination + filters (camera_id, date range, violation_type, acknowledged) |
 | `/api/alerts/export` | GET | Export alerts to CSV (same filters) |
 | `/api/alerts/<id>/acknowledge` | POST | Mark alert as acknowledged |
+| `/api/alerts/acknowledge` | POST | Reconhece em LOTE: `{"ids": [...]}` (1..500) ou `{"all": true, "kind": ..., "camera_id": ...}` |
 | `/api/alerts/stats` | GET | Alert counts by camera (total, unacknowledged) |
 
 **Key Notes:**
@@ -25,5 +26,9 @@ List, filter, export, and acknowledge alerts from violation detection.
 - `total_situacoes` (rajadas do recorte) agrupa SEMPRE pela hora de captura,
   independente de `time_field` — issue #674.
 - CSV export includes violations array flattened (one row per violation)
+- Lote: `all` tem de vir explícito (`true`). Corpo vazio nunca significa
+  "reconheça tudo". A resposta traz `acknowledged` = linhas que MUDARAM
+  (id de outro tenant / já reconhecido não contam) e `requested` (null no
+  modo `all`). O recorte de `kind` usa os MESMOS predicados da listagem.
 - Stats supports optional `camera_id` filter
 - Confidence shown as percentage in CSV

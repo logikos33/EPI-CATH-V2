@@ -9,6 +9,17 @@ export interface ToastItem {
   title: string
   description?: string
   duration?: number
+  /**
+   * Miniatura da evidência (URL assinada). Opcional e SEM placeholder: sem
+   * imagem, o aviso mostra o ícone da variante. Desenhar um quadrado cinza no
+   * lugar de uma evidência que não existe é afirmar que ela existe.
+   */
+  thumbUrl?: string
+  /**
+   * Torna o corpo do aviso clicável (o botão de fechar segue independente).
+   * Usado pelo aviso de notificação: clicar abre o evento E marca como lida.
+   */
+  onClick?: () => void
 }
 
 interface ToastStore {

@@ -33,8 +33,11 @@ const h = vi.hoisted(() => ({
   isSuperAdmin: false,
   gets: [] as string[],
   posts: [] as string[],
-  /** Corpo de cada POST — é onde o `reason` estruturado aparece (ou não). */
+  /** Corpo de cada POST — separa "uma requisição em lote" de N unitárias, e é
+   *  onde o `reason` estruturado aparece (ou não). */
   corpos: [] as unknown[],
+  /** Resposta da rota em lote: quantas linhas MUDARAM de estado. */
+  reconhecidosNoLote: 0,
   /** Servidor de mentira que GRAVA: deixa o teste conferir que a contagem da
    *  tela anda porque a lista foi RELIDA, não porque alguém carimbou o
    *  veredito no objeto local. */
@@ -91,7 +94,8 @@ vi.mock('../../services/api', () => ({
       h.corpos.push(body)
       if (h.erroDoVeredito) return Promise.reject(h.erroDoVeredito)
       h.aoPostar?.(p, body)
-      return Promise.resolve({ success: true })
+      // `acknowledged` é o que a rota em lote devolve (linhas que MUDARAM).
+      return Promise.resolve({ success: true, data: { acknowledged: h.reconhecidosNoLote } })
     }),
     downloadBlob: vi.fn(() => Promise.resolve(new Blob(['a']))),
   },
@@ -208,6 +212,7 @@ beforeEach(() => {
   h.gets.length = 0
   h.posts.length = 0
   h.corpos.length = 0
+  h.reconhecidosNoLote = 0
   h.aoPostar = null
   h.falhar = false
   h.erroDoVeredito = null
@@ -410,6 +415,45 @@ describe('paginação — page/per_page, como o backend calcula o offset', () =>
     fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'false' } })
     await waitFor(() => expect(h.gets.at(-1)).toContain('acknowledged=false'))
     expect(h.gets.at(-1)).toContain('page=1')
+  })
+})
+
+/**
+ * Reconhecer a SELEÇÃO — o defeito que o dono nomeou.
+ *
+ * Era `Promise.all` sobre `POST /alerts/<id>/acknowledge`: uma requisição por
+ * linha marcada. Agora é UMA, na rota em lote (`POST /alerts/acknowledge`).
+ *
+ * Mutação conferida: voltar ao laço no cliente deixa os dois testes vermelhos
+ * — o primeiro porque passam a existir 3 POSTs, o segundo porque o número
+ * anunciado deixa de vir do backend.
+ */
+describe('reconhecer em lote é UMA requisição', () => {
+  it('marcar 3 eventos manda um POST só, com os 3 ids', async () => {
+    h.reconhecidosNoLote = 3
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    fireEvent.click(screen.getByLabelText('Selecionar todos os eventos novos'))
+    fireEvent.click(screen.getByText('Reconhecer selecionados'))
+    await waitFor(() => expect(h.posts).toContain('/alerts/acknowledge'))
+    expect(h.posts.filter((p) => p.includes('acknowledge'))).toHaveLength(1)
+    const corpo = h.corpos.at(-1) as { ids: string[] }
+    expect(corpo.ids).toHaveLength(3)
+  })
+
+  it('se o backend reconheceu MENOS do que foi pedido, a tela diz isso', async () => {
+    // Outro operador chegou antes numa das linhas: anunciar "3 reconhecidos"
+    // seria afirmar trabalho que este clique não fez.
+    h.reconhecidosNoLote = 1
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    fireEvent.click(screen.getByLabelText('Selecionar todos os eventos novos'))
+    fireEvent.click(screen.getByText('Reconhecer selecionados'))
+    await waitFor(() =>
+      expect(useToastStore.getState().toasts.map((t) => t.title).join(' ')).toContain(
+        '1 de 3 reconhecidos',
+      ),
+    )
   })
 })
 

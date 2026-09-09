@@ -100,3 +100,34 @@ export const toastClose = style({
   flexShrink: 0,
   ':hover': { color: vars.color.textPrimary },
 })
+
+/**
+ * Corpo clicável do aviso (notificação ao vivo). Reset de botão: o aviso não
+ * pode PARECER botão — ele é o mesmo cartão, só que alcançável por teclado.
+ */
+export const toastCorpoClicavel = style({
+  border: 'none',
+  background: 'transparent',
+  padding: 0,
+  margin: 0,
+  font: 'inherit',
+  color: 'inherit',
+  textAlign: 'left',
+  cursor: 'pointer',
+  ':focus-visible': {
+    outline: `2px solid ${vars.color.primary}`,
+    outlineOffset: '2px',
+    borderRadius: vars.radius.sm,
+  },
+})
+
+/** Miniatura da evidência. `objectFit: cover` para não distorcer o frame. */
+export const toastMiniatura = style({
+  width: '44px',
+  height: '44px',
+  flexShrink: 0,
+  objectFit: 'cover',
+  borderRadius: vars.radius.sm,
+  border: `1px solid ${vars.color.borderSubtle}`,
+  background: vars.color.bgHover,
+})
