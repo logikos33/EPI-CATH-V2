@@ -68,6 +68,12 @@ vi.mock('../../services/api', () => ({
   api: { get: (...a: unknown[]) => get(...a), patch: vi.fn(), delete: vi.fn() },
 }))
 vi.mock('../../services/cameraService', () => ({ cameraService: { test: vi.fn() } }))
+// Estes casos cobrem a navegação SEM contexto assumido; o caso COM contexto é
+// exercido direto sobre `rotaHomeDoUsuario`, que é a função que decide.
+vi.mock('../../services/tenantContext', () => ({
+  isInTenantContext: () => false,
+  getSessionTokenExpMs: () => null,
+}))
 
 import { Admin } from '../admin/Admin'
 import { Carga } from '../carga/Carga'
@@ -122,16 +128,16 @@ const ABRE_AREA: Record<string, AberturaArea | null> = {
           </Routes>
         </MemoryRouter>,
       ),
-    espera: rotaHomeDoUsuario(true),
+    espera: rotaHomeDoUsuario(true, false),
     comoSuperadmin: true,
   },
   quality: {
     montar: () => render(<MemoryRouter><Qualidade /></MemoryRouter>),
-    espera: rotaHomeDoUsuario(false),
+    espera: rotaHomeDoUsuario(false, false),
   },
   carga: {
     montar: () => render(<MemoryRouter><Carga /></MemoryRouter>),
-    espera: rotaHomeDoUsuario(false),
+    espera: rotaHomeDoUsuario(false, false),
   },
 }
 
@@ -205,8 +211,18 @@ describe('nenhuma área do front novo é beco sem saída', () => {
     // `rotaHomeDoUsuario`); o comportamento fim-a-fim (href muda por papel)
     // já é RENDERIZADO em `Shell.test.tsx` ("o logo é um link para a home do
     // usuário") — não duplicado aqui.
-    expect(rotaHomeDoUsuario(true)).toBe(`${PREFIXO_NOVO}/admin`)
-    expect(rotaHomeDoUsuario(false)).toBe(`${PREFIXO_NOVO}/modules`)
+    expect(rotaHomeDoUsuario(true, false)).toBe(`${PREFIXO_NOVO}/admin`)
+    expect(rotaHomeDoUsuario(false, false)).toBe(`${PREFIXO_NOVO}/modules`)
+  })
+
+  it('com tenant assumido, a home do superadmin é a do CLIENTE — senão o logo devolve pro beco', () => {
+    // O beco relatado: assumido o contexto de um tenant, o superadmin está
+    // vendo COMO aquele cliente, mas logo, "Voltar" e raiz do prefixo
+    // apontavam todos para /admin — nenhum caminho levava ao produto do
+    // cliente, e a pessoa ficava presa na área de plataforma.
+    expect(rotaHomeDoUsuario(true, true)).toBe(`${PREFIXO_NOVO}/modules`)
+    // Sair do contexto devolve a home de plataforma.
+    expect(rotaHomeDoUsuario(true, false)).toBe(`${PREFIXO_NOVO}/admin`)
   })
 
   describe('Admin: a própria Visão geral (raiz) não mostra "Voltar"', () => {
@@ -240,7 +256,7 @@ describe('nenhuma área do front novo é beco sem saída', () => {
       auth.hasModule.mockReturnValue(gates.hasModule)
       render(<MemoryRouter><Carga /></MemoryRouter>)
       const link = screen.getByRole('link', { name: /voltar/i })
-      expect(link.getAttribute('href')).toBe(rotaHomeDoUsuario(false))
+      expect(link.getAttribute('href')).toBe(rotaHomeDoUsuario(false, false))
     })
   })
 })

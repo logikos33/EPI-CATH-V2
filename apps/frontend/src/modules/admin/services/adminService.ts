@@ -125,13 +125,13 @@ export const adminService = {
   getUser: (id: string) =>
     api.get<R<{ user: AdminUser }>>(`/v1/admin/users/${id}`).then((r) => r.data.user),
 
-  createUser: (data: { email: string; role: string; tenant_id: string; access_expires_at?: string }) =>
+  createUser: (data: { email: string; name?: string; role: string; tenant_id: string; access_expires_at?: string }) =>
     api.post<R<{ user: AdminUser; temp_password: string; first_access_token: string | null }>>(
       '/v1/admin/users',
       data,
     ).then((r) => r.data),
 
-  updateUser: (id: string, data: { role?: string; access_expires_at?: string }) =>
+  updateUser: (id: string, data: { role?: string; name?: string; access_expires_at?: string }) =>
     api.patch<R<{ updated: boolean }>>(`/v1/admin/users/${id}`, data).then((r) => r.data),
 
   deactivateUser: (id: string) =>

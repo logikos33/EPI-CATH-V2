@@ -100,6 +100,7 @@ import { lk } from '../tokens/lk.css'
 import * as s from './Qualidade.css'
 import { Link, useNavigate } from 'react-router-dom'
 import { rotaHomeDoUsuario, rotaNova } from '../RotasNovas'
+import { isInTenantContext } from '../../services/tenantContext'
 
 // ── Formas REAIS do servidor ────────────────────────────────────────────────
 
@@ -751,7 +752,7 @@ export function Qualidade() {
         {/* Sem barra lateral própria (SEM_BARRA_LATERAL): sem este link não há
             caminho de volta nenhum — regra global, ver
             app/shell/becoSemSaida.test.tsx. */}
-        <Link to={rotaHomeDoUsuario(isSuperAdmin)} className={s.voltar}>
+        <Link to={rotaHomeDoUsuario(isSuperAdmin, isInTenantContext())} className={s.voltar}>
           <ArrowLeft size={16} strokeWidth={1.7} aria-hidden="true" />
           Voltar
         </Link>

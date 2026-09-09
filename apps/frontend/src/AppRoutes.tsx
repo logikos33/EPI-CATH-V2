@@ -25,6 +25,7 @@ import { InvestigationPage } from './pages/epi/InvestigationPage'
 import { EpiSitesPage } from './pages/epi/EpiSitesPage'
 import { DashboardIntegradoPage } from './pages/DashboardIntegradoPage'
 import { lazy, Suspense } from 'react'
+import { isInTenantContext } from './services/tenantContext'
 const QualityLayout = lazy(() => import('./modules/quality/QualityLayout').then(m => ({ default: m.QualityLayout })))
 const AdminLayout = lazy(() => import('./modules/admin/AdminLayout').then(m => ({ default: m.AdminLayout })))
 const DesignSystemPage = lazy(() => import('./pages/DesignSystemPage').then(m => ({ default: m.DesignSystemPage })))
@@ -48,7 +49,7 @@ const EdgeMonitoringPage = lazy(() => import('./pages/monitoring/EdgeMonitoringP
  */
 function RootRedirect() {
   const { isSuperAdmin } = useAuth()
-  return <Navigate to={rotaHomeDoUsuario(isSuperAdmin)} replace />
+  return <Navigate to={rotaHomeDoUsuario(isSuperAdmin, isInTenantContext())} replace />
 }
 
 /**

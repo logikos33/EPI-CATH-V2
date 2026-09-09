@@ -110,6 +110,7 @@ function ModalConvidar({
   onClose: () => void
   onCriado: (cred: { email: string; senha: string }) => void
 }) {
+  const [nome, setNome] = useState('')
   const [email, setEmail] = useState('')
   const [papel, setPapel] = useState<UserRole | typeof SEM_PAPEL>(SEM_PAPEL)
   const [tenantId, setTenantId] = useState('')
@@ -123,7 +124,12 @@ function ModalConvidar({
     setSalvando(true)
     setErro(null)
     try {
-      const res = await adminService.createUser({ email: email.trim().toLowerCase(), role: papel, tenant_id: tenantId })
+      const res = await adminService.createUser({
+        email: email.trim().toLowerCase(),
+        name: nome.trim() || undefined,
+        role: papel,
+        tenant_id: tenantId,
+      })
       onCriado({ email: res.user.email, senha: res.temp_password })
     } catch (e: unknown) {
       setErro(e instanceof Error ? e.message : 'Erro ao criar usuário')
@@ -136,6 +142,19 @@ function ModalConvidar({
     <div className={s.overlay} role="dialog" aria-modal="true" aria-label="Novo usuário">
       <div className={s.modal}>
         <span className={s.modalTitulo}>Novo usuário</span>
+
+        <label className={s.campoLabel} htmlFor="us-nome">Nome</label>
+        <input
+          id="us-nome"
+          type="text"
+          className={s.campo}
+          value={nome}
+          onChange={(e) => setNome(e.target.value)}
+          placeholder="Como a pessoa assina — ex.: Ana Ribeiro"
+        />
+        <span className={s.subtitulo}>
+          É o que aparece ao validar um evento. Em branco, a tela cai no e-mail.
+        </span>
 
         <label className={s.campoLabel} htmlFor="us-email">Email</label>
         <input id="us-email" type="email" className={s.campo} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="nome@empresa.com" />
@@ -185,6 +204,8 @@ export function Usuarios() {
   const [modalConvidar, setModalConvidar] = useState(false)
   const [credencial, setCredencial] = useState<{ titulo: string; aviso: string; email: string; senha: string } | null>(null)
   const [ocupado, setOcupado] = useState<string | null>(null)
+  /** id do usuário cujo nome está em edição na linha (null = ninguém). */
+  const [renomeando, setRenomeando] = useState<string | null>(null)
 
   useEffect(() => setPagina(1), [busca, tenantFiltro])
 
@@ -222,6 +243,25 @@ export function Usuarios() {
       })
     } catch (e: unknown) {
       toast.error('Erro ao resetar senha', e instanceof Error ? e.message : undefined)
+    } finally {
+      setOcupado(null)
+    }
+  }
+
+  /** Renomear na linha. Existe porque os usuários criados antes do campo
+   *  "Nome" nasceram com `email.split("@")[0]` gravado como nome — sem um
+   *  caminho de edição eles ficariam presos nisso para sempre, e é esse nome
+   *  que o operador lê ao validar um evento. */
+  const salvarNome = async (u: AdminUser, valor: string) => {
+    const novo = valor.trim()
+    setRenomeando(null)
+    if (novo === (u.name?.trim() ?? '')) return
+    setOcupado(u.id)
+    try {
+      await adminService.updateUser(u.id, { name: novo })
+      recarregar()
+    } catch (e: unknown) {
+      toast.error('Erro ao renomear usuário', e instanceof Error ? e.message : undefined)
     } finally {
       setOcupado(null)
     }
@@ -317,14 +357,36 @@ export function Usuarios() {
                     <td className={s.td}>
                       <div className={s.pessoa}>
                         <span className={s.avatar}>{iniciais(nome)}</span>
-                        <span>{nome}</span>
+                        {renomeando === u.id ? (
+                          <input
+                            className={s.nomeInput}
+                            autoFocus
+                            defaultValue={u.name?.trim() ?? ''}
+                            aria-label={`Nome de ${u.email}`}
+                            disabled={ocupado === u.id}
+                            onBlur={(e) => void salvarNome(u, e.currentTarget.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') e.currentTarget.blur()
+                              if (e.key === 'Escape') setRenomeando(null)
+                            }}
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            className={s.nomeBotao}
+                            onClick={() => setRenomeando(u.id)}
+                            title="Clique para editar o nome"
+                          >
+                            {nome}
+                          </button>
+                        )}
                         <span className={u.is_active ? `${s.dot} ${s.dotOk}` : `${s.dot} ${s.dotNc}`} title={u.is_active ? 'Ativo' : 'Inativo'} />
                       </div>
                     </td>
                     <td className={s.td}>
                       <div className={s.papelTenant}>
                         <span className={s.papel}>{PAPEL_LABEL[u.role]}</span>
-                        <span className={s.tenantNome}>{tenantNome.toUpperCase()}</span>
+                        <span className={s.tenantNome} title={tenantNome}>{tenantNome.toUpperCase()}</span>
                       </div>
                     </td>
                     <td className={s.td}><span className={s.mono}>{u.email}</span></td>
