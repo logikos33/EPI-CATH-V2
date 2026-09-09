@@ -1,10 +1,23 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bell, ChevronDown, ChevronRight } from 'lucide-react'
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../../../services/api'
+import { Bell, CheckCheck, ChevronDown, ChevronRight } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { vars } from '../../../styles/theme.css'
 import { agruparPorRajada } from '../../../utils/rajadas'
+import {
+  CHAVE_PENDENTES,
+  buscarPendentes,
+  haQuantoTempo,
+  marcarLidas,
+  marcarTodasLidas,
+  quandoAconteceu,
+  rotaDoEvento,
+  rotuloDasClasses,
+  type Notificacao,
+  type PaginaNotificacoes,
+} from '../../../services/notificacoes'
+import { useToast } from '../Toast/useToast'
+import { useAvisosDeNotificacao } from './useAvisosDeNotificacao'
 import {
   bellWrap,
   bellBtn,
@@ -24,47 +37,9 @@ import {
   rajadaItem,
   emptyPanel,
   viewAllBtn,
+  rodape,
+  marcarTodasBtn,
 } from './NotificationBell.css'
-
-interface Violation {
-  class: string
-  confidence: number
-}
-
-interface Alert {
-  id: string
-  camera_id: string
-  camera_name?: string
-  violations: Violation[]
-  acknowledged: boolean
-  created_at: string
-}
-
-interface AlertsResponse {
-  alerts: Alert[]
-  total: number
-  /** Rajadas (câmera+classe em <60s) do MESMO filtro — ux2/dedup. Ausente em
-   *  backend/mock antigo: o badge cai para `alerts.length` (ver `count`). */
-  total_situacoes?: number
-}
-
-const VIOLATION_LABELS: Record<string, string> = {
-  no_helmet: 'Sem capacete',
-  no_vest: 'Sem colete',
-  no_gloves: 'Sem luvas',
-  no_safety_glasses: 'Sem óculos',
-  no_glasses: 'Sem óculos',
-}
-
-function timeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime()
-  const mins = Math.floor(diff / 60000)
-  if (mins < 1) return 'agora'
-  if (mins < 60) return `há ${mins}min`
-  const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `há ${hrs}h`
-  return `há ${Math.floor(hrs / 24)}d`
-}
 
 export interface NotificationBellProps {
   /**
@@ -79,10 +54,22 @@ export interface NotificationBellProps {
    * Default = o endereço do front antigo, para a `TopBar` legada seguir igual.
    */
   rotaAlertas?: string
+  /**
+   * Central de notificações (o rol com histórico). Opcional DE PROPÓSITO: ela
+   * só existe no front novo, e oferecê-la a partir da TopBar legada jogaria
+   * quem está no produto velho dentro do novo, sem aviso — o mesmo pisão de
+   * `rotaAlertas`, na direção contrária. Sem a prop, o link não aparece.
+   */
+  rotaCentral?: string
 }
 
-export function NotificationBell({ rotaAlertas = '/epi/alerts' }: NotificationBellProps = {}) {
+export function NotificationBell({
+  rotaAlertas = '/epi/alerts',
+  rotaCentral,
+}: NotificationBellProps = {}) {
   const navigate = useNavigate()
+  const toast = useToast()
+  const clienteQuery = useQueryClient()
   const [isOpen, setIsOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
 
@@ -90,22 +77,19 @@ export function NotificationBell({ rotaAlertas = '/epi/alerts' }: NotificationBe
     // ADR-0065: o sino NÃO toca por EPI presente. O roteamento de notificação
     // segue desligado (notification_channels vazia) e, quando nascer, nasce
     // ligado a este mesmo recorte de AUSÊNCIA.
-    queryKey: ['alerts-unack', 'violation'],
-    // ux2/dedup: achado do Vitor — "10 pendentes" que eram a MESMA cena de 6
-    // dias atrás. per_page subiu de 10 pra 30: nenhuma paginação nova, só
-    // mais chance de UMA rajada isolada não preencher o painel inteiro e
-    // esconder outras situações mais antigas.
-    // ponytail: não existe `group=1` no backend ainda pra pedir direto N
-    // situações distintas — pedido registrado no handoff desta rodada.
-    queryFn: () => api.get<{ data?: AlertsResponse } & AlertsResponse>(
-      '/alerts?acknowledged=false&per_page=30&page=1&kind=violation'
-    ),
+    //
+    // Chave e consulta vêm de `services/notificacoes` — o aviso (pop-up) e a
+    // central leem as MESMAS constantes. Três telas com três recortes seria
+    // três números de "quantas pendentes" discordando entre si.
+    queryKey: CHAVE_PENDENTES,
+    queryFn: buscarPendentes,
     refetchInterval: 30000,
     staleTime: 20000,
   })
 
-  const alerts: Alert[] = data?.data?.alerts ?? (data as AlertsResponse | undefined)?.alerts ?? []
-  const totalSituacoes = data?.data?.total_situacoes ?? (data as AlertsResponse | undefined)?.total_situacoes
+  const pagina = data as PaginaNotificacoes | undefined
+  const alerts: Notificacao[] = pagina?.alerts ?? []
+  const totalSituacoes = pagina?.total_situacoes
   // Badge/contagem conta SITUAÇÕES (rajadas), não linhas — ux2/dedup. Sem
   // `total_situacoes` (backend/mock antigo), cai pro que já existia.
   //
@@ -118,6 +102,48 @@ export function NotificationBell({ rotaAlertas = '/epi/alerts' }: NotificationBe
   // trunca para "99+" e o painel imprime o valor inteiro.
   const pendentes = totalSituacoes ?? alerts.length
 
+  const recarregar = () => clienteQuery.invalidateQueries({ queryKey: CHAVE_PENDENTES })
+
+  const abrir = (n: Notificacao) => {
+    // Clicar MARCA COMO LIDA (pedido do dono) e abre o evento. A marcação vai
+    // em paralelo: segurar a navegação num POST deixaria o operador olhando
+    // para o painel parado. Se o POST falhar, o evento continua pendente e o
+    // sino o mostra de novo na próxima varredura — o pior caso é reler, nunca
+    // perder.
+    marcarLidas([n.id]).then(recarregar).catch(() => {
+      toast.error('Não foi possível marcar a notificação como lida')
+    })
+    navigate(rotaDoEvento(rotaAlertas, n))
+    setIsOpen(false)
+  }
+
+  const marcarTodas = useMutation({
+    mutationFn: () => marcarTodasLidas({ kind: 'violation' }),
+    onSuccess: async (quantas) => {
+      await recarregar()
+      // O número vem do backend (linhas que MUDARAM), não do que estava na
+      // tela: o painel só carrega 30 e a marcação alcança as 235.
+      toast.success(
+        quantas === 1 ? '1 notificação marcada como lida' : `${quantas} notificações marcadas como lidas`,
+      )
+    },
+    onError: () => toast.error('Não foi possível marcar todas como lidas'),
+  })
+
+  // Pop-up de quem chega agora. Mora aqui porque o sino JÁ tem a lista e JÁ
+  // varre de 30 em 30s — um segundo componente com a própria busca criaria uma
+  // segunda contagem de pendentes.
+  //
+  // ⚠️ `pagina?.alerts` e NÃO `alerts`: o segundo é `?? []`, um array NOVO a
+  // cada render, e enquanto a busca não volta ele valeria como "já vi, estava
+  // vazio". A primeira resposta de verdade viraria 30 pop-ups de eventos
+  // antigos — exatamente o que a guarda de 1ª carga existe para impedir.
+  // `undefined` = ainda não vi resposta nenhuma; `[]` = vi, e não havia nada.
+  useAvisosDeNotificacao(pagina?.alerts, {
+    aoAbrir: abrir,
+    aoAbrirCentral: rotaCentral ? () => navigate(rotaCentral) : undefined,
+  })
+
   // Agrupa o que está NA TELA (as até 30 linhas buscadas) por câmera+classe
   // em <60s — mesma janela do backend (VerificationService). Representante +
   // alternador "+N repetições"; nunca esconde, cada repetição mantém o
@@ -127,7 +153,7 @@ export function NotificationBell({ rotaAlertas = '/epi/alerts' }: NotificationBe
       agruparPorRajada(alerts, {
         cameraId: (a) => a.camera_id,
         classe: (a) => a.violations?.[0]?.class ?? '',
-        criadoEm: (a) => a.created_at,
+        criadoEm: (a) => quandoAconteceu(a),
       }),
     [alerts],
   )
@@ -180,6 +206,19 @@ export function NotificationBell({ rotaAlertas = '/epi/alerts' }: NotificationBe
             </span>
           </div>
 
+          {/* UMA requisição para as 235, não 235 (`POST /alerts/acknowledge`). */}
+          {pendentes > 0 && (
+            <button
+              type="button"
+              className={marcarTodasBtn}
+              onClick={() => marcarTodas.mutate()}
+              disabled={marcarTodas.isPending}
+            >
+              <CheckCheck size={13} />
+              {marcarTodas.isPending ? 'Marcando…' : 'Marcar todas como lidas'}
+            </button>
+          )}
+
           <div className={panelBody}>
             {alerts.length === 0 ? (
               <div className={emptyPanel}>Nenhum alerta pendente</div>
@@ -188,21 +227,13 @@ export function NotificationBell({ rotaAlertas = '/epi/alerts' }: NotificationBe
                 const alert = grupo.representante
                 const repeticoes = grupo.repeticoes.filter(r => r.id !== alert.id)
                 const expandido = expandidos.has(alert.id)
-                const violationText = alert.violations
-                  .map(v => VIOLATION_LABELS[v.class] ?? v.class)
-                  .join(', ')
-                const abrir = (id: string, cameraId: string) => {
-                  navigate(
-                    `${rotaAlertas}?camera_id=${encodeURIComponent(cameraId)}&acknowledged=false&kind=violation&highlight=${encodeURIComponent(id)}`
-                  )
-                  setIsOpen(false)
-                }
+                const violationText = rotuloDasClasses(alert.violations)
                 return (
                   <div key={alert.id}>
                     <button
                       type="button"
                       className={alertCard}
-                      onClick={() => abrir(alert.id, alert.camera_id)}
+                      onClick={() => abrir(alert)}
                       aria-label={`Abrir alerta de ${alert.camera_name ?? 'câmera'}: ${violationText}`}
                     >
                       <div className={alertIcon}>
@@ -213,7 +244,7 @@ export function NotificationBell({ rotaAlertas = '/epi/alerts' }: NotificationBe
                           {alert.camera_name ?? 'Câmera'}
                         </div>
                         <div className={alertViolation}>{violationText}</div>
-                        <div className={alertTime}>{timeAgo(alert.created_at)}</div>
+                        <div className={alertTime}>{haQuantoTempo(quandoAconteceu(alert))}</div>
                       </div>
                     </button>
                     {/* Rajada (ux2/dedup): mesma câmera+classe em <60s — nunca
@@ -235,10 +266,10 @@ export function NotificationBell({ rotaAlertas = '/epi/alerts' }: NotificationBe
                             key={r.id}
                             type="button"
                             className={rajadaItem}
-                            onClick={() => abrir(r.id, r.camera_id)}
-                            aria-label={`Abrir alerta de ${r.camera_name ?? 'câmera'} · ${timeAgo(r.created_at)}`}
+                            onClick={() => abrir(r)}
+                            aria-label={`Abrir alerta de ${r.camera_name ?? 'câmera'} · ${haQuantoTempo(quandoAconteceu(r))}`}
                           >
-                            {timeAgo(r.created_at)}
+                            {haQuantoTempo(quandoAconteceu(r))}
                           </button>
                         ))}
                       </div>
@@ -249,15 +280,28 @@ export function NotificationBell({ rotaAlertas = '/epi/alerts' }: NotificationBe
             )}
           </div>
 
-          <button
-            className={viewAllBtn}
-            onClick={() => {
-              navigate(`${rotaAlertas}?acknowledged=false&kind=violation`)
-              setIsOpen(false)
-            }}
-          >
-            Ver todos os alertas →
-          </button>
+          <div className={rodape}>
+            <button
+              className={viewAllBtn}
+              onClick={() => {
+                navigate(`${rotaAlertas}?acknowledged=false&kind=violation`)
+                setIsOpen(false)
+              }}
+            >
+              Ver todos os alertas →
+            </button>
+            {rotaCentral && (
+              <button
+                className={viewAllBtn}
+                onClick={() => {
+                  navigate(rotaCentral)
+                  setIsOpen(false)
+                }}
+              >
+                Central de notificações (lidas e não lidas)
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

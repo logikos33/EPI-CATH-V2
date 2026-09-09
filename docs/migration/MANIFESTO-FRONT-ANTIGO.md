@@ -14,11 +14,11 @@ depois que a migração inteira estiver feita.
 | `SEM-DESENHO` | serve rota que o handoff não desenhou (Fase 0 §3.2) | ⛔ não — espera o design |
 | `INFRA` | não é tela (api, hooks, tipos, tema) | ⛔ caso a caso |
 
-## Situação — 394 arquivos, 66.919 linhas
+## Situação — 396 arquivos, 67.390 linhas
 
 | status | arquivos |
 |---|---:|
-| `INFRA` | 233 |
+| `INFRA` | 235 |
 | `PENDENTE` | 144 |
 | `SEM-DESENHO` | 7 |
 | `SUBSTITUIDA` | 6 |
@@ -185,8 +185,9 @@ apagado não são a mesma coisa.
 | `src/components/ui/Input/Input.tsx` | `INFRA` | — | 63 |
 | `src/components/ui/Modal/Modal.css.ts` | `INFRA` | — | 95 |
 | `src/components/ui/Modal/Modal.tsx` | `INFRA` | — | 42 |
-| `src/components/ui/NotificationBell/NotificationBell.css.ts` | `INFRA` | — | 201 |
-| `src/components/ui/NotificationBell/NotificationBell.tsx` | `INFRA` | — | 266 |
+| `src/components/ui/NotificationBell/NotificationBell.css.ts` | `INFRA` | — | 225 |
+| `src/components/ui/NotificationBell/NotificationBell.tsx` | `INFRA` | — | 310 |
+| `src/components/ui/NotificationBell/useAvisosDeNotificacao.ts` | `INFRA` | — | 145 |
 | `src/components/ui/PageHeader/PageHeader.css.ts` | `INFRA` | — | 45 |
 | `src/components/ui/PageHeader/PageHeader.tsx` | `INFRA` | — | 24 |
 | `src/components/ui/Panel/Panel.css.ts` | `INFRA` | — | 68 |
@@ -199,9 +200,9 @@ apagado não são a mesma coisa.
 | `src/components/ui/Stepper/Stepper.tsx` | `INFRA` | — | 32 |
 | `src/components/ui/ThemeToggle/ThemeToggle.css.ts` | `INFRA` | — | 55 |
 | `src/components/ui/ThemeToggle/ThemeToggle.tsx` | `INFRA` | — | 30 |
-| `src/components/ui/Toast/Toast.css.ts` | `INFRA` | — | 103 |
-| `src/components/ui/Toast/Toast.tsx` | `INFRA` | — | 39 |
-| `src/components/ui/Toast/useToast.ts` | `INFRA` | — | 50 |
+| `src/components/ui/Toast/Toast.css.ts` | `INFRA` | — | 134 |
+| `src/components/ui/Toast/Toast.tsx` | `INFRA` | — | 68 |
+| `src/components/ui/Toast/useToast.ts` | `INFRA` | — | 61 |
 | `src/components/ui/Tooltip/Tooltip.css.ts` | `INFRA` | — | 33 |
 | `src/components/ui/Tooltip/Tooltip.tsx` | `INFRA` | — | 29 |
 | `src/constants/epiClasses.ts` | `INFRA` | — | 29 |
@@ -235,6 +236,7 @@ apagado não são a mesma coisa.
 | `src/services/modelDisplay.ts` | `INFRA` | — | 33 |
 | `src/services/moduleService.ts` | `INFRA` | — | 54 |
 | `src/services/monitoringService.ts` | `INFRA` | — | 108 |
+| `src/services/notificacoes.ts` | `INFRA` | — | 187 |
 | `src/services/propagationService.ts` | `INFRA` | — | 157 |
 | `src/services/reportService.ts` | `INFRA` | — | 34 |
 | `src/services/searchService.ts` | `INFRA` | — | 158 |
