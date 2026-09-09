@@ -28,15 +28,33 @@ import json
 import sys
 
 _MOD = "app.infrastructure.queue.tasks.verification"
-# Outro teste desta suíte (`test_inference_alert_verification.py`) planta um
-# MagicMock neste caminho em `sys.modules` para poder importar `inference` sem
-# celery. Se ele rodar antes, o `from ... import` abaixo pegaria o mock e este
-# arquivo viraria verde-vazio. Módulo sem `__file__` = mock; descarta e recarrega.
-_carregado = sys.modules.get(_MOD)
-if _carregado is not None and getattr(_carregado, "__file__", None) is None:
+
+# ⚠️ COLETA COMPARTILHADA — este bloco é uma pinça, não um `import`.
+#
+# `test_inference_alert_verification.py` planta um MagicMock neste caminho em
+# `sys.modules` (na IMPORTAÇÃO do arquivo, não num fixture) para conseguir
+# importar `inference` sem celery instalado. Na ordem alfabética da coleção ele
+# vem ANTES deste arquivo, então um `from ... import` simples aqui pegaria o
+# mock e esta suíte inteira viraria verde-vazia — testaria um MagicMock.
+#
+# Mas descartar o mock e deixar o módulo real no lugar dele quebra o OUTRO
+# arquivo: `_queue_verification_if_low_confidence` faz o import de `verify_alert`
+# LAZY, dentro da função, e passaria a resolver a task de verdade em vez do
+# `_mock_verify_task` que as asserções de lá espionam (medido: 4 falhas na
+# suíte completa, zero rodando os arquivos isolados — a pior forma de quebrar).
+#
+# Então: tira o mock, carrega o módulo REAL, guarda a referência e DEVOLVE o
+# mock a `sys.modules`. Cada arquivo fica com o objeto que precisa e nenhum
+# depende da ordem da coleção.
+_plantado = sys.modules.get(_MOD)
+_e_mock = _plantado is not None and getattr(_plantado, "__file__", None) is None
+if _e_mock:
     sys.modules.pop(_MOD, None)
 
 from app.infrastructure.queue.tasks import verification as verification_mod  # noqa: E402
+
+if _e_mock:
+    sys.modules[_MOD] = _plantado
 
 
 def test_sem_api_key_o_motivo_e_nulo_nunca_o_erro(monkeypatch) -> None:
