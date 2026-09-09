@@ -185,3 +185,129 @@ def test_enabled_with_edge_redis_url_uses_redis_pubsub(buf, monkeypatch):
     relay._pubsub_factory()
     fake_redis_mod.Redis.from_url.assert_called_once_with("redis://127.0.0.1:6379/0")
     client.pubsub.assert_called_once_with()
+
+
+# ── evidência: a chave R2 entra no payload antes do enqueue ────────────────
+#
+# Sem isto o alerta nasce com `evidence_r2_key` NULL e o operador abre a tela
+# de Eventos sem frame para julgar — medido em 09/09: 9 linhas em
+# public.edge_events, todas sem evidência.
+
+def _payload_com_violacao(camera_id="cam-uuid-1"):
+    return {
+        "camera_id": camera_id,
+        "timestamp": "2026-09-09T04:09:01Z",
+        "detections": [{"class": "Sem protetor de ouvido", "confidence": 0.8}],
+        "has_violation": True,
+    }
+
+
+def test_evidencia_entra_no_payload_do_evento(buf):
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam: f"evidence/{cam}/20260909T040901000000.jpg",
+    )
+
+    relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao()))
+
+    (linha,) = buf.dequeue_batch()
+    assert linha["payload"]["evidence_r2_key"] == (
+        "evidence/cam-uuid-1/20260909T040901000000.jpg"
+    )
+
+
+def test_falha_na_captura_nao_impede_o_evento(buf):
+    """Degradação para o lado seguro: alerta sem imagem > alerta que não chega."""
+    def _explode(_cam):
+        raise RuntimeError("gravador mudo")
+
+    relay = DetectionRelay(buf, lambda: _FakePubSub([]), evidence_capture=_explode)
+
+    assert relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao())) is not None
+    (linha,) = buf.dequeue_batch()
+    assert "evidence_r2_key" not in linha["payload"]
+
+
+def test_sem_capturador_o_evento_segue_como_antes(buf):
+    relay = DetectionRelay(buf, lambda: _FakePubSub([]))
+
+    assert relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao())) is not None
+    (linha,) = buf.dequeue_batch()
+    assert "evidence_r2_key" not in linha["payload"]
+
+
+def test_teto_por_minuto_para_de_capturar_mas_nao_de_enfileirar(buf):
+    """Anti-lockout: cada captura é uma conexão RTSP nova no MESMO gravador
+    (29 canais na RVB). Estourado o teto, o evento sobe sem imagem."""
+    chamadas: list[str] = []
+
+    def _captura(cam):
+        chamadas.append(cam)
+        return f"evidence/{cam}/x.jpg"
+
+    agora = [0.0]
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=_captura,
+        max_evidence_per_min=2,
+        clock=lambda: agora[0],
+    )
+
+    for _ in range(5):
+        relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao()))
+
+    assert len(chamadas) == 2, chamadas
+    assert len(buf.dequeue_batch()) == 5  # os 5 eventos chegaram
+
+    agora[0] = 61.0  # janela virou
+    relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao()))
+    assert len(chamadas) == 3
+
+
+def test_frame_sem_violacao_nao_gasta_captura(buf):
+    """O gate de violação vem ANTES da captura: quadro limpo não toca o gravador."""
+    chamadas: list[str] = []
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam: chamadas.append(cam) or "k",
+    )
+
+    limpo = {**_payload_com_violacao(), "has_violation": False}
+    assert relay.handle("det:cam-uuid-1", json.dumps(limpo)) is None
+    assert chamadas == []
+
+
+def test_env_desliga_evidencia_com_teto_zero(buf, monkeypatch):
+    monkeypatch.setenv("EDGE_REDIS_URL", "redis://127.0.0.1:6379/0")
+    monkeypatch.setenv("EDGE_MAX_EVIDENCE_PER_MIN", "0")
+    relay = build_detection_relay_from_env(buf, evidence_capture=lambda cam: "k")
+    assert relay is not None
+    assert relay._evidence_capture is None
+
+
+def test_falha_pausa_a_captura_mas_os_eventos_continuam(buf):
+    """R2/nuvem fora: `capture_evidence` só devolve None depois do timeout
+    (15s) e isso roda DENTRO do loop que lê o pub/sub. Sem pausa, o custo
+    deixaria de ser 'alerta sem imagem' e viraria 'alerta que não chega'."""
+    chamadas: list[str] = []
+    agora = [0.0]
+
+    def _falha(cam):
+        chamadas.append(cam)
+        return None  # nuvem fora: upload rejeitado
+
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=_falha,
+        clock=lambda: agora[0],
+    )
+
+    for _ in range(4):
+        relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao()))
+
+    assert chamadas == ["cam-uuid-1"]         # tentou UMA vez
+    assert len(buf.dequeue_batch()) == 4      # e os 4 eventos chegaram
+
+    agora[0] = 61.0                            # pausa expirou
+    relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao()))
+    assert len(chamadas) == 2

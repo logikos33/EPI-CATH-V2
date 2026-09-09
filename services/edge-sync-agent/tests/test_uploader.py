@@ -318,3 +318,37 @@ def test_non_200_keeps_batch_and_backs_off(buf, status):
     assert up._try_upload(buf.dequeue_batch()) is False
     assert buf.count_unsent() == 1
     assert up.current_backoff() == 2.0
+
+
+# ── evidência: chave promovida do payload para o nível do evento ───────────
+#
+# `/edge/events/ingest` lê `evt["evidence_r2_key"]`, mas o buffer só tem
+# colunas type/camera/payload — o relay grava a chave DENTRO do payload. Sem a
+# promoção ela chega enterrada no JSONB e `alerts.evidence_r2_key` nasce NULL.
+
+def test_evidence_r2_key_sobe_no_nivel_do_evento(buf):
+    from app.uploader import _to_ingest_event
+
+    buf.enqueue("detection", "cam-1", {
+        "camera_id": "cam-1",
+        "detections": [{"class": "Sem óculos", "confidence": 0.9}],
+        "has_violation": True,
+        "evidence_r2_key": "evidence/cam-1/20260909T041800000000.jpg",
+    })
+    (linha,) = buf.dequeue_batch()
+
+    evento = _to_ingest_event(linha)
+
+    assert evento["evidence_r2_key"] == "evidence/cam-1/20260909T041800000000.jpg"
+
+
+def test_evento_sem_evidencia_nao_ganha_o_campo(buf):
+    """Ausente ≠ null explícito: o campo só existe quando há chave, e o
+    evento serializado tem de continuar byte-estável entre reenvios (o dedup
+    da nuvem é sha256 do JSON do evento)."""
+    from app.uploader import _to_ingest_event
+
+    buf.enqueue("detection", "cam-1", {"camera_id": "cam-1", "has_violation": True})
+    (linha,) = buf.dequeue_batch()
+
+    assert "evidence_r2_key" not in _to_ingest_event(linha)
