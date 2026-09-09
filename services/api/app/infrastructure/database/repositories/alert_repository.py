@@ -336,6 +336,65 @@ class AlertRepository(BaseRepository):
             (str(alert_id), str(tenant_id)),
         )
 
+    def acknowledge_many(
+        self,
+        tenant_id: str,
+        ids: Optional[list[str]] = None,
+        kind: Optional[str] = None,
+        camera_id: Optional[str] = None,
+    ) -> int:
+        """Reconhece em LOTE, dentro do tenant. Devolve quantas linhas mudaram.
+
+        Existe porque o cliente estava fazendo o laço: com 235 pendentes, o
+        "marcar todas" do sino disparava 235 POSTs — cada um com round-trip,
+        JWT e UPDATE próprios, e um 429 no meio deixava metade marcada sem
+        ninguém saber quais. Aqui é UM UPDATE.
+
+        `ids=None` (sem `camera_id`/`kind`) reconhece TUDO que está pendente no
+        tenant — por isso a ROTA exige `all: true` explícito para chegar aqui
+        sem ids: corpo vazio nunca pode significar "marque tudo".
+
+        `acknowledged = FALSE` no WHERE não é otimização: é o que faz o
+        rowcount devolvido significar "quantas MUDARAM", e não "quantas
+        casaram com o filtro" — reconhecer duas vezes a mesma lista tem de
+        devolver 0 na segunda.
+
+        O recorte de `kind` usa os MESMOS predicados de `list_with_filters`
+        (ADR-0065). Se divergissem, "marcar todas as violações" apagaria da
+        fila alerta que a tela nunca chamou de violação.
+
+        Cross-tenant: o id de outro tenant simplesmente não casa (rowcount 0),
+        igual ao `acknowledge` de um só — nunca 403, que confirmaria existência.
+        """
+        conditions = ["a.tenant_id = %s", "a.acknowledged = FALSE"]
+        params: list = [str(tenant_id)]
+
+        if ids is not None:
+            # `::uuid[]` e não texto: id malformado explodiria no cast — a rota
+            # valida antes (fronteira de confiança) e nunca deixa chegar aqui.
+            conditions.append("a.id = ANY(%s::uuid[])")
+            params.append(list(ids))
+        if camera_id:
+            conditions.append("a.camera_id = %s")
+            params.append(camera_id)
+
+        if kind == "compliance":
+            conditions.append(self._IS_COMPLIANCE_SQL)
+            params.append(self.presence_class_names(tenant_id))
+        elif kind == "violation":
+            conditions.append(f"{self._IS_VIOLATION_SQL} AND NOT {self._IS_COMPLIANCE_SQL}")
+            params.append(self.violation_class_names(tenant_id))
+            params.append(self.presence_class_names(tenant_id))
+        elif kind == "observacao":
+            conditions.append(f"NOT {self._IS_COMPLIANCE_SQL} AND NOT {self._IS_VIOLATION_SQL}")
+            params.append(self.presence_class_names(tenant_id))
+            params.append(self.violation_class_names(tenant_id))
+
+        return self._execute_mutation_no_return(
+            f"UPDATE alerts AS a SET acknowledged = TRUE WHERE {' AND '.join(conditions)}",
+            tuple(params),
+        )
+
     def corrigir_bboxes(
         self,
         alert_id: UUID,

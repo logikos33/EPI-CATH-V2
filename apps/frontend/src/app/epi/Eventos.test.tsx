@@ -33,6 +33,10 @@ const h = vi.hoisted(() => ({
   isSuperAdmin: false,
   gets: [] as string[],
   posts: [] as string[],
+  /** Corpo de cada POST — é o que separa "uma requisição em lote" de N unitárias. */
+  corpos: [] as unknown[],
+  /** Resposta da rota em lote: quantas linhas MUDARAM de estado. */
+  reconhecidosNoLote: 0,
   pagina: {
     alerts: [] as unknown[],
     total: 0,
@@ -62,10 +66,12 @@ vi.mock('../../services/api', () => ({
       if (h.falhar) return Promise.reject(new h.ApiErroFalso(500))
       return Promise.resolve({ success: true, data: h.pagina })
     }),
-    post: vi.fn((p: string) => {
+    post: vi.fn((p: string, corpo?: unknown) => {
       h.posts.push(p)
+      h.corpos.push(corpo)
       if (h.erroDoVeredito) return Promise.reject(h.erroDoVeredito)
-      return Promise.resolve({ success: true })
+      // `acknowledged` é o que a rota em lote devolve (linhas que MUDARAM).
+      return Promise.resolve({ success: true, data: { acknowledged: h.reconhecidosNoLote } })
     }),
     downloadBlob: vi.fn(() => Promise.resolve(new Blob(['a']))),
   },
@@ -181,6 +187,8 @@ beforeEach(() => {
   h.isSuperAdmin = false
   h.gets.length = 0
   h.posts.length = 0
+  h.corpos.length = 0
+  h.reconhecidosNoLote = 0
   h.falhar = false
   h.erroDoVeredito = null
   useToastStore.setState({ toasts: [] })
@@ -344,6 +352,45 @@ describe('paginação — page/per_page, como o backend calcula o offset', () =>
     fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'false' } })
     await waitFor(() => expect(h.gets.at(-1)).toContain('acknowledged=false'))
     expect(h.gets.at(-1)).toContain('page=1')
+  })
+})
+
+/**
+ * Reconhecer a SELEÇÃO — o defeito que o dono nomeou.
+ *
+ * Era `Promise.all` sobre `POST /alerts/<id>/acknowledge`: uma requisição por
+ * linha marcada. Agora é UMA, na rota em lote (`POST /alerts/acknowledge`).
+ *
+ * Mutação conferida: voltar ao laço no cliente deixa os dois testes vermelhos
+ * — o primeiro porque passam a existir 3 POSTs, o segundo porque o número
+ * anunciado deixa de vir do backend.
+ */
+describe('reconhecer em lote é UMA requisição', () => {
+  it('marcar 3 eventos manda um POST só, com os 3 ids', async () => {
+    h.reconhecidosNoLote = 3
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    fireEvent.click(screen.getByLabelText('Selecionar todos os eventos novos'))
+    fireEvent.click(screen.getByText('Reconhecer selecionados'))
+    await waitFor(() => expect(h.posts).toContain('/alerts/acknowledge'))
+    expect(h.posts.filter((p) => p.includes('acknowledge'))).toHaveLength(1)
+    const corpo = h.corpos.at(-1) as { ids: string[] }
+    expect(corpo.ids).toHaveLength(3)
+  })
+
+  it('se o backend reconheceu MENOS do que foi pedido, a tela diz isso', async () => {
+    // Outro operador chegou antes numa das linhas: anunciar "3 reconhecidos"
+    // seria afirmar trabalho que este clique não fez.
+    h.reconhecidosNoLote = 1
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    fireEvent.click(screen.getByLabelText('Selecionar todos os eventos novos'))
+    fireEvent.click(screen.getByText('Reconhecer selecionados'))
+    await waitFor(() =>
+      expect(useToastStore.getState().toasts.map((t) => t.title).join(' ')).toContain(
+        '1 de 3 reconhecidos',
+      ),
+    )
   })
 })
 

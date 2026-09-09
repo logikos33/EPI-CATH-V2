@@ -41,6 +41,7 @@ const Eventos = lazy(() => import('./epi/Eventos').then((m) => ({ default: m.Eve
 const Relatorios = lazy(() => import('./epi/Relatorios').then((m) => ({ default: m.Relatorios })))
 const Verificacao = lazy(() => import('./epi/Verificacao').then((m) => ({ default: m.Verificacao })))
 const Operacoes = lazy(() => import('./epi/Operacoes').then((m) => ({ default: m.Operacoes })))
+const Notificacoes = lazy(() => import('./notificacoes/Notificacoes').then((m) => ({ default: m.Notificacoes })))
 const Qualidade = lazy(() => import('./qualidade/Qualidade').then((m) => ({ default: m.Qualidade })))
 const GestaoQualidade = lazy(() => import('./qualidade/GestaoQualidade').then((m) => ({ default: m.GestaoQualidade })))
 const RevisaoQualidade = lazy(() => import('./qualidade/RevisaoQualidade').then((m) => ({ default: m.RevisaoQualidade })))
@@ -137,6 +138,12 @@ export const ROTAS_NOVAS: ReactElement[] = [
   <Route key="op" path="epi/cameras/:cameraId/operations" element={<Operacoes />} />,
   <Route key="cen" path="epi/cameras/:cameraId/cenario" element={<Cenario />} />,
   <Route key="r" path="epi/relatorios" element={<Relatorios />} />,
+
+  // Central de notificações — o rol com histórico (lidas e não lidas). Fora do
+  // grupo EPI de propósito: notificação é transversal (Qualidade e Carga
+  // notificam pela MESMA fila `alerts`), e o sino que leva até aqui vive na
+  // topbar, não na lateral de um módulo.
+  <Route key="nt" path="notificacoes" element={<Notificacoes />} />,
 
   // F4 — Qualidade e Carga. O de-para do delta manda `/quality/*` e `/carga/*`.
   <Route key="q" path="quality" element={<Qualidade />} />,

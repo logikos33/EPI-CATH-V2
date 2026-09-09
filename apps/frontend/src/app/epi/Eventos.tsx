@@ -79,6 +79,7 @@ import { useToast } from '../../components/ui/Toast/useToast'
 import { api, ApiError } from '../../services/api'
 import { cameraService } from '../../services/cameraService'
 import { confiancaInternaOuCliente } from '../../services/confidenceDisplay'
+import { marcarLidas } from '../../services/notificacoes'
 import { classificarLatencia } from '../../components/shared/ProcedenciaBadge'
 import { procedenciaDeclarada } from '../../components/shared/ProcedenciaEvento'
 import { vereditoHumano, type Veredito } from '../../components/shared/VereditoHumano'
@@ -405,14 +406,30 @@ export function Eventos() {
     }
   }
 
+  /**
+   * Reconhecer a SELEÇÃO — UMA requisição, não uma por linha.
+   *
+   * Era `Promise.all` sobre `POST /alerts/<id>/acknowledge`: com 100 linhas
+   * marcadas, 100 requisições em paralelo, cada uma com JWT e UPDATE próprios.
+   * Além do custo, o modo de falha era ruim de explicar — "37 de 100 não
+   * puderam ser reconhecidos", sem dizer QUAIS, e com a lista já recarregada
+   * por baixo. A rota em lote decide tudo numa transação e devolve quantas
+   * MUDARAM de estado.
+   */
   const reconhecerSelecionados = async () => {
     setOcupado('lote')
     const alvos = [...selecionados]
-    const falhas = await Promise.all(
-      alvos.map((id) => api.post(`/alerts/${id}/acknowledge`).then(() => 0).catch(() => 1)),
-    )
-    const erros = falhas.reduce<number>((a, b) => a + b, 0)
-    if (erros) toast.error(`${erros} de ${alvos.length} não puderam ser reconhecidos`)
+    try {
+      const quantas = await marcarLidas(alvos)
+      // O número vem do backend. Se ele vier menor que o pedido, alguma linha
+      // já estava reconhecida (outro operador chegou antes) — dizer isso é
+      // mais honesto que anunciar sucesso sobre trabalho que não aconteceu.
+      if (quantas < alvos.length) {
+        toast.info(`${quantas} de ${alvos.length} reconhecidos (o restante já estava)`)
+      }
+    } catch {
+      toast.error('Não foi possível reconhecer os eventos selecionados')
+    }
     setSelecionados([])
     setOcupado(null)
     await carregar()
