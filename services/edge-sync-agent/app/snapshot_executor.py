@@ -34,13 +34,30 @@ the caller (CommandPoller) can always ack a definite status.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+import time
+from datetime import datetime
+from typing import Any, Callable, Optional
 
 from .recorder_client import RecorderAuthError, RecorderChannelError, RecorderError
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_SECONDS = 15.0
+
+#: Origem do quadro de evidência, gravada no payload do evento.
+ORIGEM_ANCORADA = "gravador_no_instante"
+ORIGEM_AO_VIVO = "ao_vivo"
+
+#: Playback falhou -> nem tenta pelos próximos 60s, vai direto ao vivo.
+#:
+#: Existe por causa do TETO DE CONEXÕES, não da falha em si. Cada evento
+#: gasta UMA ida ao gravador; se o playback falhar e o ao vivo entrar em
+#: seguida, esse evento gastou DUAS. Sem esta pausa, um gravador que não
+#: serve playback (firmware sem `loadfile.cgi`, CGI fora do ar) dobraria
+#: permanentemente a taxa contra um aparelho com lockout anti-brute-force —
+#: exatamente o que o teto de 20/min do relay existe para impedir. Com ela,
+#: o pior caso é UMA tentativa extra por minuto.
+_PAUSA_PLAYBACK_S = 60.0
 _MIN_CHANNEL = 1
 _MAX_CHANNEL = 64  # mesmo teto do cadastro de câmeras na nuvem (channel 1..64)
 
@@ -79,6 +96,8 @@ class SnapshotExecutor:
         self._timeout = timeout
         self._circuit_open = False
         self._circuit_reason: Optional[str] = None
+        self._playback_pausado_ate = 0.0
+        self._clock: Callable[[], float] = time.monotonic
 
     # ── circuit breaker state (read-only from the outside) ─────────────────
 
@@ -233,47 +252,88 @@ class SnapshotExecutor:
 
     # ── evidência de alerta ──────────────────────────────────────────────
 
-    def capture_evidence(self, camera_id: str) -> "tuple[str | None, bytes | None]":
-        """Captura UM frame e o sobe como evidência; devolve `(chave R2, JPEG)`.
+    def capture_evidence(
+        self, camera_id: str, instante: "datetime | None" = None
+    ) -> "tuple[str | None, bytes | None, str | None]":
+        """Captura o quadro da evidência e o sobe; devolve `(chave R2, JPEG, origem)`.
 
-        Mesmo par captura+upload do snapshot, e de propósito o MESMO breaker:
-        uma credencial rejeitada tem de parar TODO acesso ao gravador, não só
-        o caminho que a descobriu (anti-lockout, CLAUDE.md).
+        *instante* é o momento em que a detecção aconteceu (o `timestamp` do
+        payload no barramento `det:*`). Com ele, o quadro vem do GRAVADOR
+        naquele instante; sem ele — ou se o gravador não tiver o trecho —
+        vem do ao vivo, que é o "agora", segundos depois.
 
-        O JPEG volta junto porque quem chama (`DetectionRelay`) precisa OLHAR o
-        quadro antes de decidir se o evento vira alerta — é o `GuardaPessoa`,
-        que barra cena sem gente. Devolver só a chave fazia o pixel morrer aqui
-        dentro, e a alternativa seria uma segunda captura: outra conexão RTSP no
-        mesmo gravador que pune tentativa repetida. Os dois valores são
-        independentes — `(None, jpeg)` é upload que falhou sobre um frame bom, e
-        o guarda ainda pode julgá-lo.
+        POR QUE ISSO IMPORTA: medido em 200 alertas da RVB, a evidência ao
+        vivo ficava 2,90s (mínimo) a 34,3s (máximo) DEPOIS da detecção,
+        mediana 4,75s. Nenhuma abaixo de 2,9s. O dono julga a foto de outro
+        momento — uma pessoa a 1,4 m/s andou ~6,6 m na mediana, e a caixa
+        desenhada pelo modelo não bate com o pixel que está na tela.
 
-        Nunca levanta. Evidência é desejável, não pode bloquear o alerta —
-        quem chama enfileira o evento com `None` e a nuvem grava o alerta sem
-        imagem, que é pior que ter imagem e MUITO melhor que não ter alerta.
+        DEGRADAÇÃO PARA O LADO SEGURO, em três degraus:
+          1. sem *instante*, ou gravador sem o trecho, ou CGI fora -> ao vivo,
+             marcado como tal em *origem* (o operador e a auditoria sabem);
+          2. ao vivo também falhou -> `(None, None, None)` e o evento sobe
+             sem imagem;
+          3. credencial rejeitada -> breaker fecha TODO acesso ao gravador.
+        Alerta sem imagem é ruim; alerta que não chega é pior.
+
+        PONTO DE EXTENSÃO (o passo seguinte que o dono pediu — rodar o modelo
+        bom sobre ESTE quadro e só então criar o alerta): o JPEG já volta
+        junto com a chave, e é o mesmo quadro que o `GuardaPessoa` julga hoje
+        no `DetectionRelay`. Buscar o quadro e decidir sobre ele já são duas
+        linhas vizinhas no mesmo lugar; virar um passo só não pede mudança
+        de desenho aqui.
+
+        Nunca levanta.
         """
         if self._circuit_open:
             logger.warning(
                 "evidence_capture_skipped camera_id=%s reason=circuito_aberto", camera_id
             )
-            return None, None
+            return None, None, None
         try:
-            jpeg_bytes = self._recorder.get_snapshot(camera_id)
+            jpeg_bytes, origem = self._quadro(camera_id, instante)
         except RecorderAuthError as exc:
             self._trip_circuit(str(exc))
-            return None, None
+            return None, None, None
         except Exception as exc:  # noqa: BLE001 — sem sinal/timeout/canal: sem evidência, com alerta
-            logger.warning(
-                "evidence_capture_failed camera_id=%s err=%s", camera_id, exc
-            )
-            return None, None
+            logger.warning("evidence_capture_failed camera_id=%s err=%s", camera_id, exc)
+            return None, None, None
         try:
             r2_key = self._upload(camera_id, jpeg_bytes, rota="evidence")
         except SnapshotUploadError as exc:
             logger.warning("evidence_upload_failed camera_id=%s err=%s", camera_id, exc)
-            return None, jpeg_bytes
+            return None, jpeg_bytes, origem
         logger.info(
-            "evidence_uploaded camera_id=%s r2_key=%s bytes=%d",
-            camera_id, r2_key, len(jpeg_bytes),
+            "evidence_uploaded camera_id=%s r2_key=%s bytes=%d origem=%s",
+            camera_id, r2_key, len(jpeg_bytes), origem,
         )
-        return r2_key, jpeg_bytes
+        return r2_key, jpeg_bytes, origem
+
+    def _quadro(
+        self, camera_id: str, instante: "datetime | None"
+    ) -> "tuple[bytes, str]":
+        """Quadro do INSTANTE, caindo para o ao vivo. Levanta se os dois falharem.
+
+        Uma ida ao gravador por evento no caminho normal. Quando o playback
+        falha, esse evento gasta duas (playback + ao vivo) e a pausa de
+        `_PAUSA_PLAYBACK_S` impede que isso vire regime — ver a constante.
+        """
+        ancorada = (
+            instante is not None
+            and hasattr(self._recorder, "capture_frame_at")
+            and self._clock() >= self._playback_pausado_ate
+        )
+        if ancorada:
+            try:
+                return self._recorder.capture_frame_at(camera_id, instante), ORIGEM_ANCORADA
+            except RecorderAuthError:
+                raise  # credencial rejeitada nunca vira fallback: é o breaker
+            except Exception as exc:  # noqa: BLE001 — trecho ausente, CGI fora, ffmpeg
+                self._playback_pausado_ate = self._clock() + _PAUSA_PLAYBACK_S
+                logger.warning(
+                    "evidencia_ancorada_falhou camera_id=%s err=%s — caindo para o "
+                    "quadro AO VIVO e pausando o playback por %.0fs (teto de conexões "
+                    "no gravador)",
+                    camera_id, exc, _PAUSA_PLAYBACK_S,
+                )
+        return self._recorder.get_snapshot(camera_id), ORIGEM_AO_VIVO

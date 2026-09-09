@@ -59,6 +59,7 @@ def build_recorder_client(
     http_client: Any = None,
     stream_subtype: int = 0,
     collection_subtype_overrides: dict[str, int] | None = None,
+    cgi_port: int = 80,
 ) -> RecorderClient:
     """Resolves a concrete RecorderClient for *protocol*.
 
@@ -79,6 +80,13 @@ def build_recorder_client(
     ao RtspTimestampRecorderClient — ONVIF (OnvifRecorderClient) não tem um
     conceito equivalente de subtype aqui, protocolo em produção no box da
     RVB é 'intelbras' (RTSP fallback).
+
+    cgi_port (eixo EVIDÊNCIA): idem, só o RtspTimestampRecorderClient — é a
+    porta do CGI HTTP pela qual a evidência é ancorada no instante da
+    detecção (`capture_frame_at`). ONVIF ancoraria por outro caminho
+    (Range: clock= no PLAY do replay), não implementado: nenhum cliente usa
+    ONVIF hoje, e escrever sem hardware para validar é o que já produziu a
+    lacuna que este PR fechou.
     """
     normalized = (protocol or "").strip().lower()
     if normalized not in _SUPPORTED_PROTOCOLS:
@@ -112,6 +120,7 @@ def build_recorder_client(
         channel_map=channel_map,
         stream_subtype=stream_subtype,
         collection_subtype_overrides=collection_subtype_overrides,
+        cgi_port=cgi_port,
     )
 
 
@@ -259,6 +268,15 @@ def build_recorder_client_from_env(env: dict[str, str] | None = None) -> Recorde
     except ValueError as exc:
         raise RecorderError(f"RECORDER_STREAM_SUBTYPE inválido: {stream_subtype_raw!r}") from exc
 
+    # Porta do CGI HTTP (eixo EVIDÊNCIA): é por ela que a evidência é ancorada
+    # no INSTANTE da detecção em vez de ser "o agora". 0 desliga e toda captura
+    # volta ao vivo — o botão de rollback sem OTA, num box em produção.
+    cgi_port_raw = source.get("RECORDER_CGI_PORT", "80")
+    try:
+        cgi_port = int(cgi_port_raw)
+    except ValueError as exc:
+        raise RecorderError(f"RECORDER_CGI_PORT inválido: {cgi_port_raw!r}") from exc
+
     collection_subtype_overrides = resolve_collection_subtype_overrides(source)
 
     return build_recorder_client(
@@ -270,6 +288,7 @@ def build_recorder_client_from_env(env: dict[str, str] | None = None) -> Recorde
         channel_map=channel_map,
         stream_subtype=stream_subtype,
         collection_subtype_overrides=collection_subtype_overrides,
+        cgi_port=cgi_port,
     )
 
 

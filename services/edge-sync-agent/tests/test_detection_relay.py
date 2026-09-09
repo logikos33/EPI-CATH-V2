@@ -7,6 +7,7 @@ ninguém enchia.
 
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -205,7 +206,9 @@ def _payload_com_violacao(camera_id="cam-uuid-1"):
 def test_evidencia_entra_no_payload_do_evento(buf):
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
-        evidence_capture=lambda cam: (f"evidence/{cam}/20260909T040901000000.jpg", b"jpg"),
+        evidence_capture=lambda cam, _ts=None: (
+            f"evidence/{cam}/20260909T040901000000.jpg", b"jpg", "ao_vivo",
+        ),
     )
 
     relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao()))
@@ -218,7 +221,7 @@ def test_evidencia_entra_no_payload_do_evento(buf):
 
 def test_falha_na_captura_nao_impede_o_evento(buf):
     """Degradação para o lado seguro: alerta sem imagem > alerta que não chega."""
-    def _explode(_cam):
+    def _explode(_cam, _ts=None):
         raise RuntimeError("gravador mudo")
 
     relay = DetectionRelay(buf, lambda: _FakePubSub([]), evidence_capture=_explode)
@@ -241,9 +244,9 @@ def test_teto_por_minuto_para_de_capturar_mas_nao_de_enfileirar(buf):
     (29 canais na RVB). Estourado o teto, o evento sobe sem imagem."""
     chamadas: list[str] = []
 
-    def _captura(cam):
+    def _captura(cam, _ts=None):
         chamadas.append(cam)
-        return f"evidence/{cam}/x.jpg", b"jpg"
+        return f"evidence/{cam}/x.jpg", b"jpg", "ao_vivo"
 
     agora = [0.0]
     relay = DetectionRelay(
@@ -269,7 +272,7 @@ def test_frame_sem_violacao_nao_gasta_captura(buf):
     chamadas: list[str] = []
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
-        evidence_capture=lambda cam: chamadas.append(cam) or ("k", b"jpg"),
+        evidence_capture=lambda cam, _ts=None: chamadas.append(cam) or ("k", b"jpg", "ao_vivo"),
     )
 
     limpo = {**_payload_com_violacao(), "has_violation": False}
@@ -280,7 +283,9 @@ def test_frame_sem_violacao_nao_gasta_captura(buf):
 def test_env_desliga_evidencia_com_teto_zero(buf, monkeypatch):
     monkeypatch.setenv("EDGE_REDIS_URL", "redis://127.0.0.1:6379/0")
     monkeypatch.setenv("EDGE_MAX_EVIDENCE_PER_MIN", "0")
-    relay = build_detection_relay_from_env(buf, evidence_capture=lambda cam: ("k", b"jpg"))
+    relay = build_detection_relay_from_env(
+        buf, evidence_capture=lambda cam, _ts=None: ("k", b"jpg", "ao_vivo")
+    )
     assert relay is not None
     assert relay._evidence_capture is None
 
@@ -292,9 +297,9 @@ def test_falha_pausa_a_captura_mas_os_eventos_continuam(buf):
     chamadas: list[str] = []
     agora = [0.0]
 
-    def _falha(cam):
+    def _falha(cam, _ts=None):
         chamadas.append(cam)
-        return None, None  # nuvem fora: upload rejeitado
+        return None, None, None  # nuvem fora: upload rejeitado
 
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
@@ -332,7 +337,9 @@ def _relay_com_captura(buffer, chamadas):
     return DetectionRelay(
         buffer,
         lambda: _FakePubSub([]),
-        evidence_capture=lambda cid: (chamadas.append(cid) or ("evidence/k.jpg", b"jpg")),
+        evidence_capture=lambda cid, _ts=None: (
+            chamadas.append(cid) or ("evidence/k.jpg", b"jpg", "ao_vivo")
+        ),
         piso_evidencia=0.5,
     )
 
@@ -401,7 +408,7 @@ def test_guarda_barra_o_evento_de_cena_vazia(buf):
     guarda = _GuardaFake(decisao=False)
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
-        evidence_capture=lambda cam: ("evidence/k.jpg", b"frame-do-evento"),
+        evidence_capture=lambda cam, _ts=None: ("evidence/k.jpg", b"frame-do-evento", "ao_vivo"),
         guarda=guarda,
     )
 
@@ -414,7 +421,7 @@ def test_guarda_deixa_passar_quando_ve_gente(buf):
     guarda = _GuardaFake(decisao=True)
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
-        evidence_capture=lambda cam: ("evidence/k.jpg", b"frame"),
+        evidence_capture=lambda cam, _ts=None: ("evidence/k.jpg", b"frame", "ao_vivo"),
         guarda=guarda,
     )
 
@@ -429,7 +436,7 @@ def test_sem_frame_o_guarda_nao_opina_e_o_evento_sobe(buf):
     guarda = _GuardaFake(decisao=False)
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
-        evidence_capture=lambda cam: ("evidence/k.jpg", b"frame"),
+        evidence_capture=lambda cam, _ts=None: ("evidence/k.jpg", b"frame", "ao_vivo"),
         piso_evidencia=0.5,
         guarda=guarda,
     )
@@ -444,7 +451,7 @@ def test_captura_que_falha_nao_deixa_o_guarda_barrar(buf):
     guarda = _GuardaFake(decisao=False)
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
-        evidence_capture=lambda cam: (None, None),
+        evidence_capture=lambda cam, _ts=None: (None, None, None),
         guarda=guarda,
     )
 
@@ -457,9 +464,79 @@ def test_upload_falho_ainda_entrega_o_frame_ao_guarda(buf):
     guarda = _GuardaFake(decisao=False)
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
-        evidence_capture=lambda cam: (None, b"frame-bom"),
+        evidence_capture=lambda cam, _ts=None: (None, b"frame-bom", "ao_vivo"),
         guarda=guarda,
     )
 
     assert relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao())) is None
     assert guarda.frames == [b"frame-bom"]
+
+
+# ── o INSTANTE da evidência (o defeito medido em 09/09/2026) ────────────────
+#
+# A evidência era o quadro ao vivo capturado no momento de enfileirar — 2,90s
+# (mínimo) a 34,3s depois do quadro que gerou a caixa, mediana 4,75s em 200
+# alertas da RVB. O dono julgava a foto de outro momento. O que estes testes
+# prendem: o relay ENTREGA o instante do evento para a captura, e o payload
+# passa a dizer de que instante o quadro é.
+
+def test_captura_recebe_o_instante_da_deteccao(buf):
+    """Falha antes do conserto: a captura era chamada só com o camera_id, e o
+    instante do evento morria no payload sem ninguém usar."""
+    recebidos: list = []
+
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam, ts: (
+            recebidos.append(ts) or ("evidence/k.jpg", b"jpg", "gravador_no_instante")
+        ),
+    )
+    relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao()))
+
+    assert len(recebidos) == 1
+    assert recebidos[0] is not None, "instante do evento não chegou na captura"
+    assert recebidos[0].isoformat() == "2026-09-09T04:09:01+00:00"
+
+
+def test_payload_diz_de_que_instante_o_quadro_e(buf):
+    """Sem isto não há como provar depois que o Δ melhorou — nem como o
+    operador saber que está olhando um momento diferente da caixa."""
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam, ts: ("evidence/k.jpg", b"jpg", "gravador_no_instante"),
+    )
+    relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao()))
+
+    (linha,) = buf.dequeue_batch()
+    assert linha["payload"]["evidence_origem"] == "gravador_no_instante"
+    assert linha["payload"]["evidence_delta_s"] == 0.0
+
+
+def test_quadro_ao_vivo_registra_o_atraso_real_no_payload(buf):
+    """Degradou para o ao vivo -> o payload CONTA isso, com o Δ de verdade.
+    Evidência ruim marcada é auditável; evidência ruim disfarçada não é."""
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam, ts: ("evidence/k.jpg", b"jpg", "ao_vivo"),
+    )
+    payload = _payload_com_violacao()
+    payload["timestamp"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=5)
+    ).isoformat()
+    relay.handle("det:cam-uuid-1", json.dumps(payload))
+
+    (linha,) = buf.dequeue_batch()
+    assert linha["payload"]["evidence_origem"] == "ao_vivo"
+    assert 4.0 <= linha["payload"]["evidence_delta_s"] <= 8.0
+
+
+def test_timestamp_ilegivel_nao_derruba_o_evento(buf):
+    """Payload sem hora legível: cai para o ao vivo, mas o alerta sobe."""
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam, ts: (ts, b"jpg", "ao_vivo"),
+    )
+    payload = _payload_com_violacao()
+    payload["timestamp"] = "ontem de manhã"
+    assert relay.handle("det:cam-uuid-1", json.dumps(payload)) is not None
+    assert len(buf.dequeue_batch()) == 1
