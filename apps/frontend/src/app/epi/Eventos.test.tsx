@@ -257,48 +257,155 @@ describe('veredito humano ≠ veredito da IA', () => {
   })
 
   // ------------------------------------------------------------------
-  // POR QUE ESTES DOIS CASOS SUBSTITUÍRAM UM SÓ
+  // A REGRA ANDOU EM UMA DIREÇÃO SÓ — e estes casos existem para não desandar
   //
-  // Até aqui existia um caso chamado "julgar é clique explícito e vai SEM
-  // motivo — o motivo é da tela de detalhe". Ele travava a decisão de que a
-  // LINHA julgava nos dois sentidos com um clique seco. Essa decisão caiu:
-  // a rejeição pela linha mandava veredito sem motivo enquanto a tela de
-  // evidência exigia motivo — a regra do motivo era contornável a um clique
-  // de distância, e quem tem pressa usa o atalho.
+  // 1ª versão: a LINHA julgava nos dois sentidos, com clique seco.
+  // 2ª versão: REJEITAR saiu (mandava veredito sem motivo enquanto a evidência
+  //            exigia motivo estruturado — regra contornável a um clique).
+  // 3ª (esta): CONFIRMAR saiu também. Palavras do dono, com a tela em operação
+  //            e centenas de eventos reais (09/09/2026): "procede e não procede
+  //            tem que sair dali, só deve aparecer de quem evidencia a foto".
   //
-  // Decisão nova (do dono, nestas palavras): "concordo com o falso positivo
-  // que está na linha, só ajusta quem viu as evidências". Rejeitar saiu da
-  // linha; confirmar ficou. Os dois casos abaixo travam os dois lados dessa
-  // assimetria — se alguém devolver o botão de rejeitar à linha achando que
-  // conserta uma regressão, o segundo caso fica vermelho.
+  // O argumento que sustentava o "Procedente" na linha era que concordar não
+  // acrescenta afirmação nova. Acrescenta: `approve` carimba
+  // `verified_by='user:<id>'` e entra no acervo com o MESMO peso do outro
+  // veredito — e a linha não mostra a foto. Num acervo em que 15% dos alertas
+  // são cena SEM NINGUÉM, concordar sem ver o frame é afirmar sobre o que não
+  // se olhou.
+  //
+  // Os dois casos abaixo travam os dois lados: nenhum veredito sai da linha, e
+  // o caminho para julgar continua a UM clique.
   // ------------------------------------------------------------------
 
-  it('a linha CONFIRMA com um clique — concordar não acrescenta afirmação nova', async () => {
-    montar()
-    await screen.findByText('CAM-04 Expedição')
-    const botoes = [...linhaDe('CAM-04 Expedição').querySelectorAll('button')]
-    fireEvent.click(botoes.find((b) => b.textContent === 'Procedente')!)
-    await waitFor(() => expect(h.posts).toContain('/verification/e1/review'))
-  })
-
-  it('a linha NÃO rejeita: falso positivo só existe onde a pessoa vê a evidência', async () => {
+  it('a linha NÃO julga — nem procedente, nem falso positivo', async () => {
     montar()
     await screen.findByText('CAM-04 Expedição')
     const linha = linhaDe('CAM-04 Expedição')
 
-    // O CONTROLE sumiu: nada nesta linha dispara `reject` sem alguém olhar o
-    // frame. `reject` vira dado de treino — rejeitar às cegas envenena o
-    // acervo com ruído que ninguém consegue reler depois.
-    expect(within(linha).queryByRole('button', { name: 'Falso positivo' })).toBeNull()
+    // FALHA ANTES: existia um <button>Procedente</button> nesta célula que
+    // disparava POST /verification/e1/review sem ninguém ver o frame.
+    expect(within(linha).queryByRole('button', { name: 'Procedente' })).toBeNull()
+    expect(within(linha).queryByRole('button', { name: /Falso positivo/ })).toBeNull()
+    expect(
+      within(linha).queryByRole('link', {
+        name: 'Abrir a evidência para marcar falso positivo',
+      }),
+    ).toBeNull()
 
-    // Mas o CAMINHO ficou visível, e por isso é asserção e não comentário:
-    // esconder o controle sem mostrar a saída deixaria o operador sem ter
-    // como discordar do detector — que é pior do que o atalho que saiu.
-    const saida = within(linha).getByRole('link', {
-      name: 'Abrir a evidência para marcar falso positivo',
-    })
-    expect(saida.getAttribute('href')).toBe(rotaNova('/epi/eventos/e1'))
-    expect(saida.textContent).toContain('Falso positivo')
+    // E não é só o controle: NADA nesta linha manda veredito.
+    for (const botao of within(linha).queryAllByRole('button')) fireEvent.click(botao)
+    expect(h.posts.filter((p) => p.includes('/review'))).toEqual([])
+  })
+
+  it('sumiu o CONTROLE, não o caminho: a evidência continua a um clique da linha', async () => {
+    // Esconder o veredito sem deixar como chegar nele seria pior que o atalho
+    // que saiu — o operador ficaria sem como discordar do detector.
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    expect(within(gaveta).getByRole('button', { name: /Confirmar/ })).toBeTruthy()
+    expect(within(gaveta).getByRole('button', { name: /Falso positivo/ })).toBeTruthy()
+    expect(within(linhaDe('CAM-04 Expedição')).getByRole('link', { name: 'Abrir →' })).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Defeito 1 (dono, 09/09/2026): "esse aqui está aparecendo API KEY NÃO
+// CONFIGURADA".
+//
+// `alerts.verification_reason` é coluna COMPARTILHADA entre gente e máquina.
+// A task Celery de triagem gravava ali o texto do erro dela quando não havia
+// ANTHROPIC_API_KEY (`tasks/verification.py`), e a linha imprimia o campo sem
+// perguntar quem escreveu — erro de infraestrutura servido ao operador como se
+// fosse a justificativa de alguém, em centenas de linhas.
+// ---------------------------------------------------------------------------
+
+describe('erro de infraestrutura não é conteúdo de tela', () => {
+  const COM_ERRO_DA_IA = [
+    {
+      ...EVENTOS[0],
+      // O que o banco da RVB tem hoje, escrito pela triagem automática.
+      verification_reason: 'API key não configurada',
+      verification_verdict: null,
+      verified_by: null,
+    },
+    {
+      ...EVENTOS[3],
+      // A FAMÍLIA inteira, não só a frase que o dono viu.
+      verification_reason: 'Erro IA: Connection reset by peer',
+      verification_verdict: 'reject',
+      verified_by: 'claude-haiku',
+    },
+  ]
+
+  it('motivo escrito pela MÁQUINA não chega à tela', async () => {
+    h.pagina = { alerts: COM_ERRO_DA_IA, total: 2, page: 1, per_page: 20, pages: 1 } as never
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const texto = document.body.textContent ?? ''
+    expect(texto).not.toContain('API key não configurada')
+    expect(texto).not.toContain('Erro IA:')
+    expect(texto).not.toContain('Connection reset by peer')
+  })
+
+  it('e o motivo de GENTE continua aparecendo — o gate não é uma mordaça', async () => {
+    montar()
+    await screen.findByText('CAM-07 Linha 2')
+    expect(linhaDe('CAM-07 Linha 2').textContent).toContain(
+      'A caixa pegou a luva do outro operador',
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Defeito 3 (dono): "o status está novo mesmo depois de avaliado".
+//
+// A célula lia só `ev.acknowledged`; julgar mexe em `verification_verdict`/
+// `verified_by`. Dois atos, duas colunas — e a tela olhava uma só, chamando de
+// "Novo" o que uma pessoa já tinha julgado.
+// ---------------------------------------------------------------------------
+
+describe('STATUS conta quão longe o evento andou, não só a ciência', () => {
+  const status = (camera: string) => linhaDe(camera).cells[4].textContent ?? ''
+
+  it('julgado por gente deixa de ser "Novo" — vira "Avaliado"', async () => {
+    montar()
+    await screen.findByText('CAM-07 Linha 2')
+    // e3: verdict 'approve' + verified_by 'user:u-1', acknowledged FALSE.
+    // FALHA ANTES: a célula dizia "Novo".
+    expect(status('CAM-07 Linha 2')).toContain('Avaliado')
+    expect(status('CAM-07 Linha 2')).not.toContain('Novo')
+  })
+
+  it('veredito da IA NÃO promove o status — a prova de gente é `user:`', async () => {
+    montar()
+    await screen.findByText('CAM-01 Doca Norte')
+    // e2: verdict 'reject' por 'claude-haiku', acknowledged TRUE.
+    expect(status('CAM-01 Doca Norte')).toContain('Reconhecido')
+    expect(status('CAM-01 Doca Norte')).not.toContain('Avaliado')
+  })
+
+  it('sem ciência e sem veredito continua "Novo"', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    expect(status('CAM-04 Expedição')).toContain('Novo')
+  })
+
+  it('o STATUS não vira uma segunda coluna de veredito', async () => {
+    // "Avaliado" diz que ANDOU, nunca PARA ONDE — procedente/falso positivo
+    // moram na coluna ao lado, com a paleta delas.
+    montar()
+    await screen.findByText('CAM-07 Linha 2')
+    expect(status('CAM-07 Linha 2')).not.toContain('Procedente')
+    expect(status('CAM-07 Linha 2')).not.toContain('Falso positivo')
+  })
+
+  it('quem já foi julgado não recebe convite a "Reconhecer"', async () => {
+    montar()
+    await screen.findByText('CAM-07 Linha 2')
+    const linha = linhaDe('CAM-07 Linha 2')
+    expect(within(linha).queryByRole('button', { name: 'Reconhecer' })).toBeNull()
+    expect(within(linha).queryByRole('checkbox')).toBeNull()
   })
 })
 
@@ -429,8 +536,11 @@ describe('paginação — page/per_page, como o backend calcula o offset', () =>
  * anunciado deixa de vir do backend.
  */
 describe('reconhecer em lote é UMA requisição', () => {
-  it('marcar 3 eventos manda um POST só, com os 3 ids', async () => {
-    h.reconhecidosNoLote = 3
+  // Dos 4 da fixture, 2 são selecionáveis: e2 já está reconhecido e e3 já foi
+  // JULGADO por gente — quem julgou fez mais do que dar ciência, e voltar a
+  // pedir ciência dele é trabalho que não muda nada na tela.
+  it('marcar os eventos manda um POST só, com os ids', async () => {
+    h.reconhecidosNoLote = 2
     montar()
     await screen.findByText('CAM-04 Expedição')
     fireEvent.click(screen.getByLabelText('Selecionar todos os eventos novos'))
@@ -438,11 +548,11 @@ describe('reconhecer em lote é UMA requisição', () => {
     await waitFor(() => expect(h.posts).toContain('/alerts/acknowledge'))
     expect(h.posts.filter((p) => p.includes('acknowledge'))).toHaveLength(1)
     const corpo = h.corpos.at(-1) as { ids: string[] }
-    expect(corpo.ids).toHaveLength(3)
+    expect(corpo.ids).toEqual(['e1', 'e4'])
   })
 
   it('se o backend reconheceu MENOS do que foi pedido, a tela diz isso', async () => {
-    // Outro operador chegou antes numa das linhas: anunciar "3 reconhecidos"
+    // Outro operador chegou antes numa das linhas: anunciar "2 reconhecidos"
     // seria afirmar trabalho que este clique não fez.
     h.reconhecidosNoLote = 1
     montar()
@@ -451,7 +561,7 @@ describe('reconhecer em lote é UMA requisição', () => {
     fireEvent.click(screen.getByText('Reconhecer selecionados'))
     await waitFor(() =>
       expect(useToastStore.getState().toasts.map((t) => t.title).join(' ')).toContain(
-        '1 de 3 reconhecidos',
+        '1 de 2 reconhecidos',
       ),
     )
   })
@@ -782,12 +892,15 @@ describe('a lista diz QUEM desenhou a caixa, não só quando ela chegou', () => 
 describe('veredito que colidiu com o de outra pessoa', () => {
   const FRASE = 'Maria Silva já avaliou este alerta há 2 minutos'
 
+  // Pela GAVETA, que é onde o veredito passou a morar (defeito 2). Antes este
+  // helper clicava num botão "Procedente" da linha, que não existe mais.
   const julgarComConflito = async (status: number, frase = FRASE) => {
     h.permissoes = ['alerts:read', 'alerts:feedback', 'verification:write']
     h.erroDoVeredito = new h.ApiErroFalso(status, frase)
     montar()
     await screen.findByText('CAM-04 Expedição')
-    fireEvent.click(screen.getAllByRole('button', { name: 'Procedente' })[0])
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    fireEvent.click(within(gaveta).getByRole('button', { name: /Confirmar/ }))
     await waitFor(() => expect(h.posts.length).toBeGreaterThan(0))
   }
 
@@ -891,16 +1004,49 @@ async function abrirEvidencia(camera: string) {
 }
 
 describe('a lista vai da última para a primeira, e diz a hora local', () => {
-  it('as linhas saem da captura mais NOVA para a mais antiga', async () => {
+  /**
+   * Defeito 4 (dono): "a fila tem que mudar com base no status: o que foi
+   * avaliado tem que ir para o final".
+   *
+   * A ordem é decidida no SERVIDOR (`_JULGADO_POR_HUMANO_SQL ASC` antes do
+   * LIMIT/OFFSET — ver o teste de integração `test_alertas_fila_julgados...`).
+   * Mas `agruparPorRajada` reagrupa a página e REORDENA os grupos por hora,
+   * jogando fora a ordem de entrada: sem o `sort` estável da tela, o trabalho
+   * do servidor não sobrevive à renderização. Por isso o caso vive aqui
+   * também, e não só na integração.
+   */
+  it('não-julgado primeiro; dentro de cada grupo, o mais recente', async () => {
     montar()
     await screen.findByText('CAM-04 Expedição')
-    // 14:32 · 14:20 · 14:07 · 13:44 — o backend já ordena assim
-    // (`ORDER BY a.timestamp DESC, a.id DESC`) e a tela não pode reembaralhar.
     const texto = document.body.textContent ?? ''
-    const posicoes = ['CAM-04 Expedição', 'CAM-07 Linha 2', 'CAM-01 Doca Norte', 'CAM-04 Doca Sul']
+    // Capturas: e1 14:32 · e3 14:20 · e2 14:07 · e4 13:44.
+    // e3 é o ÚNICO com veredito de gente (`user:u-1`) → vai para o fim.
+    // e2 tem veredito da IA ('claude-haiku'), que NÃO conta como julgado.
+    // FALHA ANTES: a ordem era puramente cronológica e e3 saía em 2º.
+    const posicoes = ['CAM-04 Expedição', 'CAM-01 Doca Norte', 'CAM-04 Doca Sul', 'CAM-07 Linha 2']
       .map((nome) => texto.indexOf(nome))
     expect(posicoes.every((p) => p >= 0)).toBe(true)
     expect([...posicoes].sort((a, b) => a - b)).toEqual(posicoes)
+  })
+
+  it('rajada com trabalho restante NÃO afunda por causa do representante', async () => {
+    // O representante é o mais recente. Se ele estiver julgado e as
+    // repetições não, o grupo ainda é trabalho — esconder no rodapé faria
+    // sumir da vista o que ninguém olhou.
+    h.pagina = {
+      alerts: [
+        { ...RAJADA[2], verification_verdict: 'approve', verified_by: 'user:u-1' },
+        RAJADA[1],
+        RAJADA[0],
+        { ...EVENTOS[3], id: 'z9', camera_name: 'CAM-99 Sozinha',
+          created_at: '2026-08-25T13:00:00', timestamp: '2026-08-25T13:00:00' },
+      ],
+      total: 4, page: 1, per_page: 20, pages: 1,
+    } as never
+    montar()
+    await screen.findByText('CAM-09 Rajada')
+    const texto = document.body.textContent ?? ''
+    expect(texto.indexOf('CAM-09 Rajada')).toBeLessThan(texto.indexOf('CAM-99 Sozinha'))
   })
 
   it('imprime a hora LOCAL de quem lê, nunca o carimbo cru do servidor', async () => {
@@ -992,9 +1138,9 @@ describe('veredito pela gaveta — o que o dono chamou de "aprovar ou não aprov
     const gaveta = await abrirEvidencia('CAM-04 Expedição')
     expect(within(gaveta).getByText('1 de 4 nesta página')).toBeTruthy()
     fireEvent.click(within(gaveta).getByRole('button', { name: /Confirmar/ }))
-    // Ordem visível: 14:32 → 14:20 → 14:07 → 13:44.
+    // Ordem visível com julgado no fim: e1 14:32 → e2 14:07 → e4 13:44 → e3.
     await screen.findByText('2 de 4 nesta página')
-    expect(within(screen.getByRole('dialog')).getByText('CAM-07 LINHA 2')).toBeTruthy()
+    expect(within(screen.getByRole('dialog')).getByText('CAM-01 DOCA NORTE')).toBeTruthy()
   })
 
   it('a releitura NÃO remonta a tabela — é assim que a posição na lista fica', async () => {

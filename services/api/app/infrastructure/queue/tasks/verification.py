@@ -67,10 +67,27 @@ Diretrizes:
 
 
 def _call_claude(camera_id: str, class_name: str, confidence: float, module_code: str) -> dict:
-    """Chama Claude claude-haiku-4-5-20251001 para análise de detecção."""
+    """Chama Claude claude-haiku-4-5-20251001 para análise de detecção.
+
+    ⚠️ `reason=None` em TODA falha de infraestrutura (chave ausente, resposta
+    impossível de parsear, exceção na chamada) — nunca o texto do erro.
+
+    `reason` é persistido em `alerts.verification_reason`, e essa coluna é
+    CONTEÚDO DE TELA: sai embaixo do selo de veredito em `/epi/eventos` e na
+    ficha da fila de verificação. Enquanto estas três linhas devolviam o erro
+    técnico, a tela do cliente imprimia "API key não configurada" em cima de
+    centenas de eventos reais — reportado pelo dono da RVB em 09/09/2026,
+    olhando a tela em operação. Erro de infraestrutura é assunto de LOG (o
+    `logger.warning`/`logger.error` logo acima já o registra, com o `exc`
+    inteiro), não de fila de operador.
+
+    Nada de informação se perde: `verification_status` continua gravando
+    'needs_human', que é exatamente o que aconteceu — a triagem não concluiu e
+    o caso vai para gente.
+    """
     if not _ANTHROPIC_KEY:
         logger.warning("anthropic_key_missing: defaulting to needs_human")
-        return {"verdict": "needs_human", "reason": "API key não configurada", "adjusted_confidence": confidence}
+        return {"verdict": "needs_human", "reason": None, "adjusted_confidence": confidence}
 
     try:
         import anthropic  # noqa: PLC0415
@@ -98,14 +115,14 @@ def _call_claude(camera_id: str, class_name: str, confidence: float, module_code
 
     except json.JSONDecodeError as exc:
         logger.error("claude_json_parse_error: %s", exc)
-        return {"verdict": "needs_human", "reason": "Erro ao parsear resposta IA", "adjusted_confidence": confidence}
+        return {"verdict": "needs_human", "reason": None, "adjusted_confidence": confidence}
     except Exception as exc:
         logger.error("claude_call_error: %s", exc)
-        return {"verdict": "needs_human", "reason": f"Erro IA: {exc}", "adjusted_confidence": confidence}
+        return {"verdict": "needs_human", "reason": None, "adjusted_confidence": confidence}
 
 
 def _update_alert_verification(
-    alert_id: str, verdict: str, reason: str, confidence: float, tenant_id: str,
+    alert_id: str, verdict: str, reason: str | None, confidence: float, tenant_id: str,
 ) -> None:
     """Atualiza verification_status/verdict da alerta no DB.
 
@@ -204,7 +221,7 @@ def verify_alert(
     except Exception as exc:
         logger.error("verify_alert_error: alert=%s err=%s", alert_id, exc)
         try:
-            _update_alert_verification(alert_id, "needs_human", f"Erro: {exc}", confidence, tenant_id)
+            _update_alert_verification(alert_id, "needs_human", None, confidence, tenant_id)
         except Exception:
             pass
         raise self.retry(exc=exc, countdown=30)
