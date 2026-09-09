@@ -205,7 +205,7 @@ def _payload_com_violacao(camera_id="cam-uuid-1"):
 def test_evidencia_entra_no_payload_do_evento(buf):
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
-        evidence_capture=lambda cam: f"evidence/{cam}/20260909T040901000000.jpg",
+        evidence_capture=lambda cam: (f"evidence/{cam}/20260909T040901000000.jpg", b"jpg"),
     )
 
     relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao()))
@@ -243,7 +243,7 @@ def test_teto_por_minuto_para_de_capturar_mas_nao_de_enfileirar(buf):
 
     def _captura(cam):
         chamadas.append(cam)
-        return f"evidence/{cam}/x.jpg"
+        return f"evidence/{cam}/x.jpg", b"jpg"
 
     agora = [0.0]
     relay = DetectionRelay(
@@ -269,7 +269,7 @@ def test_frame_sem_violacao_nao_gasta_captura(buf):
     chamadas: list[str] = []
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
-        evidence_capture=lambda cam: chamadas.append(cam) or "k",
+        evidence_capture=lambda cam: chamadas.append(cam) or ("k", b"jpg"),
     )
 
     limpo = {**_payload_com_violacao(), "has_violation": False}
@@ -280,7 +280,7 @@ def test_frame_sem_violacao_nao_gasta_captura(buf):
 def test_env_desliga_evidencia_com_teto_zero(buf, monkeypatch):
     monkeypatch.setenv("EDGE_REDIS_URL", "redis://127.0.0.1:6379/0")
     monkeypatch.setenv("EDGE_MAX_EVIDENCE_PER_MIN", "0")
-    relay = build_detection_relay_from_env(buf, evidence_capture=lambda cam: "k")
+    relay = build_detection_relay_from_env(buf, evidence_capture=lambda cam: ("k", b"jpg"))
     assert relay is not None
     assert relay._evidence_capture is None
 
@@ -294,7 +294,7 @@ def test_falha_pausa_a_captura_mas_os_eventos_continuam(buf):
 
     def _falha(cam):
         chamadas.append(cam)
-        return None  # nuvem fora: upload rejeitado
+        return None, None  # nuvem fora: upload rejeitado
 
     relay = DetectionRelay(
         buf, lambda: _FakePubSub([]),
@@ -332,7 +332,7 @@ def _relay_com_captura(buffer, chamadas):
     return DetectionRelay(
         buffer,
         lambda: _FakePubSub([]),
-        evidence_capture=lambda cid: (chamadas.append(cid) or "evidence/k.jpg"),
+        evidence_capture=lambda cid: (chamadas.append(cid) or ("evidence/k.jpg", b"jpg")),
         piso_evidencia=0.5,
     )
 
@@ -376,3 +376,90 @@ def test_confianca_maxima_usa_a_maior_deteccao():
     assert DetectionRelay._confianca_maxima(p) == 0.7
     assert DetectionRelay._confianca_maxima({}) == 0.0
     assert DetectionRelay._confianca_maxima({"detections": [{}]}) == 0.0
+
+
+# ── guarda de pessoa: cena vazia não vira alerta ────────────────────────────
+#
+# Medido em 2026-09-09 sobre 60 frames de evidência REAIS da RVB, com árbitro
+# independente: 9 (15%) eram cena vazia. O relay é o ÚNICO ponto no repo entre
+# o publicador do box (que não está aqui) e o alerta na nuvem.
+
+class _GuardaFake:
+    """Guarda de mentira com o mesmo contrato: True publica, False barra."""
+
+    def __init__(self, decisao=True):
+        self.decisao = decisao
+        self.frames: list[bytes] = []
+
+    def julgar(self, _camera_id, payload, frame):
+        self.frames.append(frame)
+        payload["guarda_pessoa"] = {"veredito": "sem_pessoa" if not self.decisao else "com_pessoa"}
+        return self.decisao
+
+
+def test_guarda_barra_o_evento_de_cena_vazia(buf):
+    guarda = _GuardaFake(decisao=False)
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam: ("evidence/k.jpg", b"frame-do-evento"),
+        guarda=guarda,
+    )
+
+    assert relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao())) is None
+    assert buf.count_unsent() == 0, "o alerta não pode nascer"
+    assert guarda.frames == [b"frame-do-evento"], "julgou o MESMO frame da evidência"
+
+
+def test_guarda_deixa_passar_quando_ve_gente(buf):
+    guarda = _GuardaFake(decisao=True)
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam: ("evidence/k.jpg", b"frame"),
+        guarda=guarda,
+    )
+
+    assert relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao())) is not None
+    (linha,) = buf.dequeue_batch()
+    assert linha["payload"]["guarda_pessoa"]["veredito"] == "com_pessoa"
+
+
+def test_sem_frame_o_guarda_nao_opina_e_o_evento_sobe(buf):
+    """Abaixo do piso de evidência não há captura — e sem pixel o guarda não
+    pode barrar. Degradação para o lado seguro."""
+    guarda = _GuardaFake(decisao=False)
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam: ("evidence/k.jpg", b"frame"),
+        piso_evidencia=0.5,
+        guarda=guarda,
+    )
+
+    assert relay.handle("det:cam-1", _payload(0.30)) is not None
+    assert guarda.frames == []
+    assert buf.count_unsent() == 1
+
+
+def test_captura_que_falha_nao_deixa_o_guarda_barrar(buf):
+    """Gravador mudo devolve (None, None): sem frame, publica."""
+    guarda = _GuardaFake(decisao=False)
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam: (None, None),
+        guarda=guarda,
+    )
+
+    assert relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao())) is not None
+    assert guarda.frames == []
+
+
+def test_upload_falho_ainda_entrega_o_frame_ao_guarda(buf):
+    """R2 fora: o alerta nasce sem imagem, mas o pixel existe e vale julgar."""
+    guarda = _GuardaFake(decisao=False)
+    relay = DetectionRelay(
+        buf, lambda: _FakePubSub([]),
+        evidence_capture=lambda cam: (None, b"frame-bom"),
+        guarda=guarda,
+    )
+
+    assert relay.handle("det:cam-uuid-1", json.dumps(_payload_com_violacao())) is None
+    assert guarda.frames == [b"frame-bom"]

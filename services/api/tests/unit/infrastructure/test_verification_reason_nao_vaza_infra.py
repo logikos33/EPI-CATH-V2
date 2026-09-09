@@ -150,3 +150,29 @@ def test_motivo_de_verdade_da_ia_continua_passando(monkeypatch) -> None:
     resultado = verification_mod._call_claude("cam-1", "Sem capacete", 0.62, "epi")
 
     assert resultado["reason"] == "Confiança na faixa ambígua para esta classe"
+
+
+def test_excecao_nao_leva_o_conteudo_do_erro_para_a_tela(monkeypatch) -> None:
+    """O teste acima prova que o motivo fica NULO; este prova o que estava em
+    jogo — o CONTEÚDO do erro.
+
+    `f"Erro IA: {exc}"` carrega o que estiver no caminho: host, caminho de
+    arquivo, DSN com senha. Ia direto para uma coluna que a tela renderiza.
+    A asserção é sobre a propriedade, não sobre a frase.
+    """
+    monkeypatch.setattr(verification_mod, "_ANTHROPIC_KEY", "sk-de-mentira")
+    segredo = "postgres://usuario:senha-secreta@host-interno:5432/base"
+
+    class _ClienteVazado:
+        def __init__(self, *_a, **_kw) -> None:
+            raise RuntimeError(f"falha conectando em {segredo}")
+
+    modulo_falso = type(sys)("anthropic")
+    modulo_falso.Anthropic = _ClienteVazado  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", modulo_falso)
+
+    resultado = verification_mod._call_claude("cam-1", "Sem mascara", 0.7, "epi")
+
+    assert resultado["reason"] is None
+    assert segredo not in json.dumps(resultado)
+    assert "senha-secreta" not in json.dumps(resultado)
