@@ -20,6 +20,7 @@ Cobre:
 """
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -865,3 +866,62 @@ class TestPrimeiraMetrica:
 
         assert _primeira_metrica({}, "mAP50", "map50") == 0.0
         assert _primeira_metrica({"map50": "n/a"}, "mAP50", "map50") == 0.0
+
+
+class TestRegistroNasceComClasses:
+    """O registro do modelo tem de nascer sabendo QUE CLASSES ele detecta.
+
+    Antes disto, `trained_models.metrics` saía do treino só com `map50`
+    agregado: no DEV, os 4 modelos mais recentes não registram classe nenhuma,
+    e descobrir o que cada um detecta exigiu caçar `dataset_version_id` e ler
+    `class_distribution` à mão. Como o NOME mente (`6ca25ee9` = "5 classes",
+    todas de PRESENÇA, incapaz de acusar violação), não havia atalho honesto.
+    """
+
+    @staticmethod
+    def _repo_com_distribuicao(distribuicao):
+        """`_execute_one` responde por CONSULTA (o helper padrão devolve o
+        mesmo valor pra todas, o que esconderia a leitura nova)."""
+        def responder(sql, params=None):
+            if "class_distribution" in sql:
+                return {"class_distribution": distribuicao}
+            if "FROM trained_models" in sql:
+                return None  # guard anti-duplicação: nenhum modelo ainda
+            if "framework" in sql:
+                return {"framework": "rfdetr"}
+            return {"cnt": 0}
+        return responder
+
+    def _rodar(self, distribuicao):
+        mock_compute = MagicMock()
+        mock_compute.dispatch.return_value = _DEFAULT_RESULT
+        with patch.object(training_mod, "DatabasePool"), \
+             patch.object(training_mod, "AnnotationRepository") as mock_repo_cls, \
+             patch.object(training_mod, "_publish_progress"), \
+             patch.object(training_mod, "get_training_compute", return_value=mock_compute), \
+             patch.object(training_mod, "verify_model_artifact", return_value=True):
+            mock_repo_cls.return_value._execute_one.side_effect = (
+                self._repo_com_distribuicao(distribuicao)
+            )
+            training_mod.dispatch_training(_JOB_ID, _DSV_ID, epochs=5)
+        _, params = _find_insert_call(mock_repo_cls.return_value)
+        return json.loads([p for p in params if isinstance(p, str) and p.startswith("{")][0])
+
+    def test_classes_gravadas_no_metrics(self) -> None:
+        gravado = self._rodar({"Botas": 531, "Sem Luvas": 951})
+        assert gravado["classes"] == ["Botas", "Sem Luvas"]
+        assert gravado["classes_origem"] == "dataset_versions.class_distribution"
+        # Aditivo: as métricas do provider continuam ali, intactas.
+        assert gravado["mAP50"] == 0.5
+
+    def test_chave_reservada_nao_vira_classe(self) -> None:
+        """`__sem_suporte_treino__` lista classes EXCLUÍDAS do treino."""
+        gravado = self._rodar({"Botas": 531, "__sem_suporte_treino__": ["Sem botas"]})
+        assert gravado["classes"] == ["Botas"]
+
+    def test_sem_distribuicao_nao_inventa_campo(self) -> None:
+        """Sem fato registrado, o campo simplesmente não existe — nunca uma
+        lista vazia que pareça 'modelo sem classes'."""
+        gravado = self._rodar({})
+        assert "classes" not in gravado
+        assert "classes_origem" not in gravado

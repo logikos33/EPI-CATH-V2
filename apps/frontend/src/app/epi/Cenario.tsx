@@ -102,6 +102,11 @@ interface Operacao {
 interface ClasseCatalogo {
   class_name: string
   display_name: string
+  /** `module_service.get_classes` publica TRÊS estados —
+   * `'violacao' | 'conformidade' | 'indefinida'`. Ausente quando o endpoint é
+   * chamado sem tenant: nesse caso a tela não marca nada, porque afirmar
+   * indisponibilidade sem o dado é a mesma mentira ao contrário. */
+  polaridade?: string | null
 }
 
 type Forma = 'area' | 'linha'
@@ -198,6 +203,100 @@ const TEMPLATE_ROTULO: Record<TemplateKey, string> = {
  * percentual — os números seguem o schema, não a prancha. */
 const SENSIBILIDADE_PCT: Record<string, number> = { alta: 30, media: 10, baixa: 3 }
 const SENSIBILIDADE_FRASE: Record<string, string> = { alta: 'quase se tocando', media: 'a um passo de distância', baixa: 'no mesmo canto da cena' }
+
+// ── por que uma classe do catálogo pode não servir nesta regra ───────────────
+//
+// O BUG QUE ISTO FECHA (reproduzido na tela): ao salvar, o rodapé recusava
+// «classe inválida: 'Sem Óculos' não pertence ao módulo epi deste cliente» —
+// para classes que a PRÓPRIA TELA oferecia como selecionáveis. São duas
+// listas, medidas no código:
+//
+//   OFERECE  `GET /modules/<code>/classes` → `module_service.get_classes()`:
+//            catálogo global ∪ classes do tenant, SEM filtro de polaridade.
+//            Devolve `polaridade` com três estados, inclusive `'indefinida'`.
+//   ACEITA   `EpiZoneOperation._classes_validas()` (epi_zone.py) = união de
+//            `presence_class_names` + `violation_class_names`, e as duas
+//            filtram `is_violation IS TRUE` / `IS FALSE`
+//            (`AlertRepository._nomes_por_polaridade`). Classe com
+//            `is_violation IS NULL` não cai em nenhuma das duas: é oferecida
+//            e recusada.
+//
+// Quem está em NULL no RVB não chegou lá por acidente:
+// `scripts/ops/aplicar_calibracao_rvb.py` rebaixou de propósito
+// «Sem protetor de ouvido», «Uso incorreto de mascara» e «Sem Óculos» para
+// INDECISAS (ADR-0067, precisão medida abaixo da régua) — exatamente as três
+// classes do erro relatado.
+//
+// A trava vale SÓ para a zona de EPI: é a única operação que valida nome de
+// classe. `position`, `counting_line`, `dwell_zone` e `overlap_dynamic` só
+// exigem que o campo não venha vazio (medido nos `validate_config` das cinco
+// classes canônicas). Bloquear nelas seria mentir na direção contrária —
+// escrever "indisponível" onde salva.
+//
+// ⚠️ ESTA REGRA É ESPELHO. O dia em que `_classes_validas()` passar a aceitar
+// classe indecisa (o docstring dele diz "classes que EXISTEM para este
+// cliente" — polaridade ali é proxy, não intenção), o bloqueio abaixo tem de
+// cair NO MESMO PR: manter seria a mesma mentira ao contrário. O teste
+// «a lista oferecida é subconjunto do que o backend aceita» é o lembrete.
+
+interface Restricao {
+  /** Selo curto, dentro do chip. */
+  selo: string
+  /** O motivo, em frase de gente — aparece na lista abaixo dos chips. */
+  motivo: string
+  /** `true` = o backend recusa ao salvar, então a tela não deixa escolher. */
+  bloqueia: boolean
+}
+
+/** Nomes (lower) pelos quais uma classe pode ser referida. O escopo do modelo
+ * e o backend gravam ora o técnico (`no_gloves`), ora o rótulo (`Sem Luvas`);
+ * `AlertRepository._NOMES_DO_CATALOGO` compara pelos DOIS e aqui é igual. */
+function nomesDaClasse(c: ClasseCatalogo): string[] {
+  return [c.class_name, c.display_name].filter(Boolean).map((n) => n.toLowerCase())
+}
+
+/** Classes que o backend citou ao recusar o último save. A rede de segurança
+ * para o motivo que a tela NÃO consegue prever: seja qual for, o operador vê
+ * em QUAL chip está o problema em vez de só um parágrafo vermelho. Formato de
+ * `epi_zone.validate_config`; se ele mudar, isto acha zero e o erro cru
+ * continua na tela como hoje. */
+function classesRecusadasNoErro(mensagem: string): string[] {
+  return [...mensagem.matchAll(/classe inválida: '([^']+)'/g)].map((m) => m[1].toLowerCase())
+}
+
+function restricaoDaClasse(
+  c: ClasseCatalogo,
+  tplKey: TemplateKey,
+  escopoDaCamera: string[] | null,
+  recusadas: string[],
+): Restricao | null {
+  const nomes = nomesDaClasse(c)
+  if (recusadas.some((n) => nomes.includes(n))) {
+    return {
+      selo: 'recusada',
+      motivo:
+        'O backend recusou esta classe na última tentativa de salvar. Tire-a da regra para salvar o resto.',
+      bloqueia: true,
+    }
+  }
+  if (tplKey === 'epi' && c.polaridade === 'indefinida') {
+    return {
+      selo: 'sem polaridade',
+      motivo:
+        'O cadastro ainda não diz se ela é conformidade ou violação, e a zona de EPI recusa classe indecisa ao salvar. Decida a polaridade no Estúdio.',
+      bloqueia: true,
+    }
+  }
+  if (escopoDaCamera && !escopoDaCamera.some((n) => nomes.includes(n))) {
+    return {
+      selo: 'fora do escopo',
+      motivo:
+        'O modelo desta câmera não responde por ela: a regra salva, mas nunca dispara aqui. Amplie o escopo em Modelos por câmera.',
+      bloqueia: false,
+    }
+  }
+  return null
+}
 
 const PONTOS_AREA_PADRAO: [number, number][] = [[0.22, 0.34], [0.7, 0.32], [0.74, 0.76], [0.18, 0.8]]
 const PONTOS_LINHA_PADRAO: [number, number][] = [[0.62, 0.18], [0.66, 0.84]]
@@ -353,6 +452,12 @@ export function Cenario() {
   const [camera, setCamera] = useState<Camera | null>(null)
   const [ops, setOps] = useState<Operacao[] | null>(null)
   const [classes, setClasses] = useState<ClasseCatalogo[]>([])
+  /** Escopo REAL do modelo desta câmera (`config.classes` do deployment
+   * ativo, migration 100). `null` = câmera sem modelo próprio: o worker cai no
+   * detector padrão do ambiente e ninguém aqui sabe o que ele emite — a tela
+   * diz isso em vez de marcar o catálogo inteiro como fora do escopo. */
+  const [escopoCamera, setEscopoCamera] = useState<string[] | null>(null)
+  const [recusadas, setRecusadas] = useState<string[]>([])
   const [moduleIdPorCodigo, setModuleIdPorCodigo] = useState<Record<string, string>>({})
 
   const [capacidadePausa, setCapacidadePausa] = useState<CapacidadePausa>('desconhecida')
@@ -392,10 +497,25 @@ export function Cenario() {
           Object.fromEntries((modRes?.data?.modules ?? []).map((m) => [m.module_code, m.id])),
         )
         const moduloAlvo = moduloDaCamera({ active_module: cam?.active_module })
-        return api
-          .get<ApiResponse<{ classes?: ClasseCatalogo[] }>>(`/modules/${moduloAlvo}/classes`)
-          .then((r) => setClasses(r.data?.classes ?? []))
-          .catch(() => undefined)
+        return Promise.all([
+          api
+            .get<ApiResponse<{ classes?: ClasseCatalogo[] }>>(`/modules/${moduloAlvo}/classes`)
+            .then((r) => setClasses(r.data?.classes ?? []))
+            .catch(() => undefined),
+          api
+            .get<ApiResponse<{ deployment?: { config?: { classes?: string[] } | null } | null }>>(
+              `/cameras/${cameraId}/model-config?module=${encodeURIComponent(moduloAlvo)}`,
+            )
+            .then((r) => {
+              const escopo = r.data?.deployment?.config?.classes
+              setEscopoCamera(
+                Array.isArray(escopo) && escopo.length > 0 ? escopo.map((n) => String(n).toLowerCase()) : null,
+              )
+            })
+            // Escopo é informação a MAIS; se não vier, a tela não inventa nem
+            // trava — só deixa de marcar.
+            .catch(() => setEscopoCamera(null)),
+        ])
       })
       .then(() => setSituacao('pronto'))
       .catch((e) => {
@@ -440,6 +560,7 @@ export function Cenario() {
     setDesenhando(false)
     setAvancadoAberto(false)
     setErroSalvar(null)
+    setRecusadas([])
     setPasso('template')
   }
 
@@ -467,6 +588,7 @@ export function Cenario() {
     setDesenhando(false)
     setAvancadoAberto(false)
     setErroSalvar(null)
+    setRecusadas([])
     setPasso('editando')
   }
 
@@ -537,6 +659,7 @@ export function Cenario() {
     if (!tpl || !completo || !cond) return
     setSalvando(true)
     setErroSalvar(null)
+    setRecusadas([])
     try {
       const config = construirConfig(tpl, { pontos, classes: classesSel, cond, seg, sens })
       if (editId !== null) {
@@ -555,7 +678,11 @@ export function Cenario() {
       }
       setPasso('lista')
     } catch (err) {
-      setErroSalvar(err instanceof Error ? err.message : 'Erro ao salvar a regra')
+      const mensagem = err instanceof Error ? err.message : 'Erro ao salvar a regra'
+      setErroSalvar(mensagem)
+      // Marca no CHIP a classe que o backend citou — o operador não precisa
+      // decifrar o parágrafo vermelho para saber qual tirar.
+      setRecusadas(classesRecusadasNoErro(mensagem))
     } finally {
       setSalvando(false)
     }
@@ -642,6 +769,8 @@ export function Cenario() {
   if (passo === 'editando' && tpl && cond) {
     const t = tpl
     const previewTexto = frase(t, nome, classesSel.map(nomeClasse), cond, seg)
+    const restricoes = classes.map((c) => ({ c, r: restricaoDaClasse(c, t.key, escopoCamera, recusadas) }))
+    const comMotivo = restricoes.filter((x): x is { c: ClasseCatalogo; r: Restricao } => x.r !== null)
     const faltaTxt = faltaNome
       ? 'Dê um nome ao lugar — ele aparece em todo evento.'
       : faltaClasse
@@ -780,25 +909,47 @@ export function Cenario() {
                 <span className={s.dicaInline}>{t.minClasses > 1 ? 'escolha as duas' : 'pode escolher mais de um'}</span>
               </div>
               <div className={s.linhaClasses}>
-                {classes.map((c) => {
+                {restricoes.map(({ c, r }) => {
                   const on = classesSel.includes(c.class_name)
+                  // Bloqueada MAS já escolhida continua clicável — só para
+                  // TIRAR. Uma regra antiga com classe hoje recusada precisa
+                  // ter saída; travar o chip deixaria o operador sem como
+                  // salvar o resto.
+                  const travado = !!r?.bloqueia && !on
                   return (
                     <button
                       key={c.class_name}
-                      className={on ? s.chipClasse.ativo : s.chipClasse.inativo}
-                      onClick={() =>
-                        setClassesSel((prev) => (on ? prev.filter((x) => x !== c.class_name) : [...prev, c.class_name]))
-                      }
+                      className={r ? s.chipClasse.restrito : on ? s.chipClasse.ativo : s.chipClasse.inativo}
+                      disabled={travado}
+                      title={r?.motivo}
+                      onClick={() => {
+                        if (travado) return
+                        setClassesSel((prev) =>
+                          on ? prev.filter((x) => x !== c.class_name) : [...prev, c.class_name],
+                        )
+                      }}
                     >
                       <span className={on ? s.pontoChip.ativo : s.pontoChip.inativo} />
                       {c.display_name}
+                      {r && <span className={s.seloChip}>{r.selo}</span>}
                     </button>
                   )
                 })}
               </div>
+              {comMotivo.length > 0 && (
+                <div className={s.blocoMotivos}>
+                  {comMotivo.map(({ c, r }) => (
+                    <span key={c.class_name} className={s.motivoLinha}>
+                      <b>{c.display_name}</b> · {r.motivo}
+                    </span>
+                  ))}
+                </div>
+              )}
               <span className={s.textoAjuda}>
-                Só aparece aqui o que esta câmera já sabe reconhecer. Falta algo?{' '}
-                <Link to={rotaNova('/estudio/modelos-por-camera')}>ensine no Estúdio</Link>.
+                {escopoCamera
+                  ? 'A lista é o cadastro do módulo deste cliente; o selo marca o que o modelo desta câmera não reconhece ou o que esta regra não aceita.'
+                  : 'A lista é o cadastro do módulo deste cliente. Esta câmera não tem modelo próprio configurado, então não dá para afirmar aqui o que ela reconhece.'}{' '}
+                <Link to={rotaNova('/estudio/modelos-por-camera')}>Ver modelos por câmera</Link>.
               </span>
             </div>
 

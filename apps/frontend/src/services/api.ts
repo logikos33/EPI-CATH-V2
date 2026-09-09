@@ -17,6 +17,7 @@
  * ÚNICA fonte do prefixo — `AppRoutes.tsx` já a importa pelo mesmo motivo.
  */
 import { rotaNova } from '../app/RotasNovas'
+import { apagarSessao, gravarSessao, lerSessao } from './sessao'
 
 export const TOKEN_KEY = 'token'
 
@@ -45,18 +46,20 @@ export class ApiError extends Error {
   }
 }
 
-export const getToken = (): string | null => localStorage.getItem(TOKEN_KEY)
-export const setToken = (t: string) => localStorage.setItem(TOKEN_KEY, t)
+// Sessão por ABA (services/sessao.ts): localStorage é um só por navegador e
+// fazia o segundo login derrubar o primeiro na mesma máquina.
+export const getToken = (): string | null => lerSessao(TOKEN_KEY)
+export const setToken = (t: string) => gravarSessao(TOKEN_KEY, t)
 export const removeToken = () => {
-  localStorage.removeItem(TOKEN_KEY)
-  localStorage.removeItem('user')
+  apagarSessao(TOKEN_KEY)
+  apagarSessao('user')
   // WS6: logout/expiração encerra qualquer visualização "ver como" pendente —
   // sem isso o banner reapareceria indevidamente no próximo login
-  localStorage.removeItem('impersonation_backup')
-  localStorage.removeItem('impersonation')
+  apagarSessao('impersonation_backup')
+  apagarSessao('impersonation')
   // Contexto de tenant assumido: mesma lógica — logout nunca deixa resíduo
-  localStorage.removeItem('tenant_context_backup')
-  localStorage.removeItem('tenant_context')
+  apagarSessao('tenant_context_backup')
+  apagarSessao('tenant_context')
 }
 
 // ── Impersonation "ver como" (WS6) ──────────────────────────────────────────
@@ -71,14 +74,14 @@ export const IMPERSONATION_EXPIRED_FLAG = 'impersonation_expired'
  * iniciar uma visualização "ver como". Retorna true se havia backup.
  */
 export function restoreImpersonationBackup(redirect = rotaNova('/admin/tenants')): boolean {
-  const raw = localStorage.getItem(IMPERSONATION_BACKUP_KEY)
-  localStorage.removeItem(IMPERSONATION_BACKUP_KEY)
-  localStorage.removeItem(IMPERSONATION_META_KEY)
+  const raw = lerSessao(IMPERSONATION_BACKUP_KEY)
+  apagarSessao(IMPERSONATION_BACKUP_KEY)
+  apagarSessao(IMPERSONATION_META_KEY)
   if (!raw) return false
   try {
     const backup = JSON.parse(raw) as { token?: string | null; user?: string | null }
-    if (backup.token) localStorage.setItem(TOKEN_KEY, backup.token)
-    if (backup.user) localStorage.setItem('user', backup.user)
+    if (backup.token) gravarSessao(TOKEN_KEY, backup.token)
+    if (backup.user) gravarSessao('user', backup.user)
     window.location.href = redirect
     return true
   } catch {
@@ -107,14 +110,14 @@ export const TENANT_CONTEXT_EXPIRED_META_KEY = 'tenant_context_expired_meta'
  * assumir o contexto de um tenant. Retorna true se havia backup.
  */
 export function restoreTenantContextBackup(redirect = rotaNova('/admin/tenants')): boolean {
-  const raw = localStorage.getItem(TENANT_CONTEXT_BACKUP_KEY)
-  localStorage.removeItem(TENANT_CONTEXT_BACKUP_KEY)
-  localStorage.removeItem(TENANT_CONTEXT_META_KEY)
+  const raw = lerSessao(TENANT_CONTEXT_BACKUP_KEY)
+  apagarSessao(TENANT_CONTEXT_BACKUP_KEY)
+  apagarSessao(TENANT_CONTEXT_META_KEY)
   if (!raw) return false
   try {
     const backup = JSON.parse(raw) as { token?: string | null; user?: string | null }
-    if (backup.token) localStorage.setItem(TOKEN_KEY, backup.token)
-    if (backup.user) localStorage.setItem('user', backup.user)
+    if (backup.token) gravarSessao(TOKEN_KEY, backup.token)
+    if (backup.user) gravarSessao('user', backup.user)
     window.location.href = redirect
     return true
   } catch {
@@ -177,7 +180,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
           authRedirectStarted = true
           // WS6: token de visualização "ver como" expirou → restaura o
           // superadmin em vez de deslogar (flag p/ toast pós-reload)
-          if (localStorage.getItem(IMPERSONATION_BACKUP_KEY)) {
+          if (lerSessao(IMPERSONATION_BACKUP_KEY)) {
             sessionStorage.setItem(IMPERSONATION_EXPIRED_FLAG, '1')
             if (restoreImpersonationBackup()) {
               throw new Error('Visualização encerrada (token expirou)')
@@ -188,8 +191,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
           // restoreTenantContextBackup apaga TENANT_CONTEXT_META_KEY, e sem
           // isso o banner pós-reload não sabe de qual tenant oferecer
           // "Reassumir".
-          if (localStorage.getItem(TENANT_CONTEXT_BACKUP_KEY)) {
-            const expiredMeta = localStorage.getItem(TENANT_CONTEXT_META_KEY)
+          if (lerSessao(TENANT_CONTEXT_BACKUP_KEY)) {
+            const expiredMeta = lerSessao(TENANT_CONTEXT_META_KEY)
             if (expiredMeta) sessionStorage.setItem(TENANT_CONTEXT_EXPIRED_META_KEY, expiredMeta)
             sessionStorage.setItem(TENANT_CONTEXT_EXPIRED_FLAG, '1')
             if (restoreTenantContextBackup()) {

@@ -10,7 +10,7 @@
  * sobrevive em sessionStorage (TENANT_CONTEXT_EXPIRED_META_KEY) pro banner
  * ler depois do reload.
  *
- * localStorage/sessionStorage reais são pouco confiáveis neste ambiente de
+ * sessionStorage/sessionStorage reais são pouco confiáveis neste ambiente de
  * teste (ver comentário em AppShellTheme.test.tsx — themeStore é mockado de
  * propósito pelo mesmo motivo) — substituídos por um Storage in-memory via
  * vi.stubGlobal, mesma identidade que o módulo sob teste enxerga.
@@ -46,7 +46,7 @@ function jsonResponse(status: number, body: unknown): Response {
 
 describe('api.ts — expiração do contexto de tenant assumido (401)', () => {
   beforeEach(() => {
-    vi.stubGlobal('localStorage', new MemoryStorage())
+    vi.stubGlobal('sessionStorage', new MemoryStorage())
     vi.stubGlobal('sessionStorage', new MemoryStorage())
     // window.location.href = '/x' navega de verdade no jsdom — troca por um
     // objeto que só grava o valor.
@@ -63,12 +63,12 @@ describe('api.ts — expiração do contexto de tenant assumido (401)', () => {
 
   it('preserva tenant_id/tenant_name em sessionStorage antes de restaurar o superadmin', async () => {
     // Estado: superadmin assumiu contexto da RVB — token trocado, backup salvo.
-    localStorage.setItem(TOKEN_KEY, 'assumed-tenant-token')
-    localStorage.setItem(
+    sessionStorage.setItem(TOKEN_KEY, 'assumed-tenant-token')
+    sessionStorage.setItem(
       TENANT_CONTEXT_BACKUP_KEY,
       JSON.stringify({ token: 'superadmin-token', user: JSON.stringify({ role: 'superadmin' }) }),
     )
-    localStorage.setItem(
+    sessionStorage.setItem(
       TENANT_CONTEXT_META_KEY,
       JSON.stringify({
         tenant_id: 'tenant-rvb',
@@ -95,19 +95,19 @@ describe('api.ts — expiração do contexto de tenant assumido (401)', () => {
     expect(sessionStorage.getItem(TENANT_CONTEXT_EXPIRED_FLAG)).toBe('1')
 
     // Superadmin restaurado — NUNCA derruba pro /login enquanto houver backup.
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('superadmin-token')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('superadmin-token')
     // #760: era `/admin/tenants`, o painel do front ANTIGO — o token expirava
     // e o superadmin acordava no produto velho. Hoje é a MESMA tela no novo.
     expect(window.location.href).toBe('/novo/admin/tenants')
     expect(window.location.href).not.toBe('/login')
 
     // Backup consumido — não sobra resíduo pro próximo 401 reprocessar (evita loop).
-    expect(localStorage.getItem(TENANT_CONTEXT_BACKUP_KEY)).toBeNull()
-    expect(localStorage.getItem(TENANT_CONTEXT_META_KEY)).toBeNull()
+    expect(sessionStorage.getItem(TENANT_CONTEXT_BACKUP_KEY)).toBeNull()
+    expect(sessionStorage.getItem(TENANT_CONTEXT_META_KEY)).toBeNull()
   })
 
   it('sem backup de contexto assumido: 401 cai no logout normal (sem loop)', async () => {
-    localStorage.setItem(TOKEN_KEY, 'some-token')
+    sessionStorage.setItem(TOKEN_KEY, 'some-token')
 
     vi.stubGlobal(
       'fetch',
@@ -117,7 +117,7 @@ describe('api.ts — expiração do contexto de tenant assumido (401)', () => {
     await expect(api.get('/cameras')).rejects.toThrow()
 
     expect(window.location.href).toBe('/login')
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull()
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBeNull()
     expect(sessionStorage.getItem(TENANT_CONTEXT_EXPIRED_FLAG)).toBeNull()
   })
 
@@ -129,12 +129,12 @@ describe('api.ts — expiração do contexto de tenant assumido (401)', () => {
     // removido, caíam em removeToken() — APAGANDO o token de superadmin
     // recém-restaurado — e window.location.href='/login' (a última atribuição
     // vence). Log real: "token de playback inválido" ×8 + GET /login ×10.
-    localStorage.setItem(TOKEN_KEY, 'assumed-tenant-token')
-    localStorage.setItem(
+    sessionStorage.setItem(TOKEN_KEY, 'assumed-tenant-token')
+    sessionStorage.setItem(
       TENANT_CONTEXT_BACKUP_KEY,
       JSON.stringify({ token: 'superadmin-token', user: JSON.stringify({ role: 'superadmin' }) }),
     )
-    localStorage.setItem(
+    sessionStorage.setItem(
       TENANT_CONTEXT_META_KEY,
       JSON.stringify({
         tenant_id: 'tenant-rvb',
@@ -157,7 +157,7 @@ describe('api.ts — expiração do contexto de tenant assumido (401)', () => {
     // O destino é o retorno ao superadmin — NUNCA o /login, e no front NOVO (#760).
     expect(window.location.href).toBe('/novo/admin/tenants')
     // E o token restaurado sobrevive às outras 7 respostas.
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('superadmin-token')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('superadmin-token')
     expect(sessionStorage.getItem(TENANT_CONTEXT_EXPIRED_FLAG)).toBe('1')
   })
 })

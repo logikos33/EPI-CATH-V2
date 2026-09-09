@@ -29,6 +29,27 @@ def _get_repo() -> EdgeEventRepository:
     return EdgeEventRepository(DatabasePool.get_instance())  # type: ignore[arg-type]
 
 
+def _virar_alerta(tenant_id: str, site_id: str | None, evt: dict) -> bool:
+    """Delega ao escritor único de alerta (inference.`alerta_de_evento_do_edge`).
+
+    Import tardio: `...queue.tasks.inference` puxa o app do Celery, e o
+    blueprint é importado no boot da API. Só a rota tem o `site_id` (vem do
+    device token), e é por isso que ele atravessa daqui até `alerts.site_id`.
+    """
+    from app.infrastructure.queue.tasks.inference import (  # noqa: PLC0415
+        alerta_de_evento_do_edge,
+    )
+
+    return alerta_de_evento_do_edge(
+        tenant_id,
+        site_id,
+        evt.get("camera_id"),
+        evt.get("payload") or {},
+        evidence_r2_key=evt.get("evidence_r2_key"),
+        occurred_at=evt.get("occurred_at"),
+    )
+
+
 @edge_events_bp.route("/ingest", methods=["POST"])
 @require_device_scope("events:write")  # DeviceTokenScope.events_write
 def ingest_events() -> tuple:
@@ -43,6 +64,8 @@ def ingest_events() -> tuple:
 
     repo = _get_repo()
     ingested = 0
+    alerts_created = 0
+    alerts_failed = 0
     for evt in events:
         if not isinstance(evt, dict):
             continue
@@ -68,7 +91,37 @@ def ingest_events() -> tuple:
         if row:
             ingested += 1
 
-    return success({"ingested": ingested, "submitted": len(events), "batch_id": batch_id})
+        if event_type != "detection":
+            continue
+        # A detecção do box também tem de virar ALERTA — `edge_events` não tem
+        # leitor no produto (a tela do operador lê `public.alerts`) e tudo que
+        # chegava aqui morria numa tabela que ninguém consulta.
+        #
+        # Uma falha NÃO derruba o batch (até 500 eventos; os outros precisam
+        # entrar) mas TAMBÉM não pode sumir: vai para o log em nível de erro e
+        # para os contadores da resposta.
+        try:
+            if _virar_alerta(tenant_id, site_id, evt):
+                alerts_created += 1
+        except Exception as exc:  # noqa: BLE001 — um evento ruim não pode matar o lote
+            alerts_failed += 1
+            logger.error(
+                "edge_event_alerta_falhou: batch=%s camera=%s err=%s",
+                batch_id, evt.get("camera_id"), exc, exc_info=True,
+            )
+
+    if alerts_failed:
+        logger.error(
+            "edge_ingest_alertas_com_falha: batch=%s criados=%d falharam=%d",
+            batch_id, alerts_created, alerts_failed,
+        )
+    return success({
+        "ingested": ingested,
+        "submitted": len(events),
+        "batch_id": batch_id,
+        "alerts_created": alerts_created,
+        "alerts_failed": alerts_failed,
+    })
 
 
 @edge_events_bp.route("", methods=["GET"])

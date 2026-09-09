@@ -5,6 +5,7 @@
  */
 import { useState, useCallback } from 'react'
 import { api, setToken, removeToken, getToken } from '../services/api'
+import { gravarSessao, lerSessao } from '../services/sessao'
 
 export interface User {
   id: string
@@ -50,13 +51,13 @@ export async function renovarSessao(): Promise<number> {
   const { token, user, expires_at: expiraEm } = res.data ?? {}
   if (!token || !expiraEm) throw new Error('Resposta de renovação incompleta')
   setToken(token)
-  if (user) localStorage.setItem('user', JSON.stringify(user))
+  if (user) gravarSessao('user', JSON.stringify(user))
   return expiraEm * 1000
 }
 
 export function useAuth() {
   const [user, setUser] = useState<User | null>(() => {
-    try { return JSON.parse(localStorage.getItem('user') || 'null') }
+    try { return JSON.parse(lerSessao('user') || 'null') }
     catch { return null }
   })
 
@@ -81,7 +82,7 @@ export function useAuth() {
     const res = await api.post<any>('/auth/login', { email, password })
     const { token, user } = res.data  // ✅ correto: res.data contém {token, user}
     setToken(token)
-    localStorage.setItem('user', JSON.stringify(user))
+    gravarSessao('user', JSON.stringify(user))
     setUser(user)
     // Reload para App.tsx ler do localStorage (hooks são instâncias separadas).
     // ⚠️ `redirectTo` SÓ aceita literais internos dos call sites — nunca ligue
@@ -105,7 +106,7 @@ export function useAuth() {
     const res = await api.post<any>('/auth/register', { name, email, password })
     const { token, user } = res.data  // ✅ correto
     setToken(token)
-    localStorage.setItem('user', JSON.stringify(user))
+    gravarSessao('user', JSON.stringify(user))
     setUser(user)
     return user
   }, [])

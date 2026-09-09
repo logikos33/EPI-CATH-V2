@@ -19,6 +19,7 @@ import {
   IMPERSONATION_BACKUP_KEY,
   IMPERSONATION_META_KEY,
 } from './api'
+import { gravarSessao, lerSessao } from './sessao'
 
 export interface ImpersonationMeta {
   target_name: string
@@ -38,13 +39,13 @@ interface ImpersonateResponse {
 
 /** Há uma visualização "ver como" ativa neste navegador? */
 export function isImpersonating(): boolean {
-  return localStorage.getItem(IMPERSONATION_META_KEY) !== null
+  return lerSessao(IMPERSONATION_META_KEY) !== null
 }
 
 /** Metadados da visualização ativa (nome/email do alvo) — p/ o banner. */
 export function getImpersonationMeta(): ImpersonationMeta | null {
   try {
-    return JSON.parse(localStorage.getItem(IMPERSONATION_META_KEY) || 'null')
+    return JSON.parse(lerSessao(IMPERSONATION_META_KEY) || 'null')
   } catch {
     return null
   }
@@ -62,9 +63,9 @@ export async function startImpersonation(userId: string): Promise<void> {
   const { token, user } = res.data
 
   // Backup do superadmin ANTES de trocar o token
-  const backup = { token: getToken(), user: localStorage.getItem('user') }
-  localStorage.setItem(IMPERSONATION_BACKUP_KEY, JSON.stringify(backup))
-  localStorage.setItem(
+  const backup = { token: getToken(), user: lerSessao('user') }
+  gravarSessao(IMPERSONATION_BACKUP_KEY, JSON.stringify(backup))
+  gravarSessao(
     IMPERSONATION_META_KEY,
     JSON.stringify({
       target_name: (user.name as string) || '',
@@ -74,7 +75,7 @@ export async function startImpersonation(userId: string): Promise<void> {
     } satisfies ImpersonationMeta),
   )
   setToken(token)
-  localStorage.setItem('user', JSON.stringify(user))
+  gravarSessao('user', JSON.stringify(user))
   // #760: era `'/'`. Logado, `/` cai no `RootRedirect` — que ATÉ ESTE PR
   // mandava para `/admin`|`/modules`, os dois no front ANTIGO. Recarregar na
   // raiz do prefixo novo é o mesmo destino ("a home de quem eu virei"), sem
