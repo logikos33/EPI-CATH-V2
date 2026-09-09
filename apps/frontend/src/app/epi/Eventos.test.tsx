@@ -20,7 +20,7 @@
  * backend (`offset = (page-1)*per_page`). Trocar por offset cru ou cursor
  * nesta família já custou metade das linhas de uma página.
  */
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -33,6 +33,25 @@ const h = vi.hoisted(() => ({
   isSuperAdmin: false,
   gets: [] as string[],
   posts: [] as string[],
+  /** Corpo de cada POST — é onde o `reason` estruturado aparece (ou não). */
+  corpos: [] as unknown[],
+  /** Servidor de mentira que GRAVA: deixa o teste conferir que a contagem da
+   *  tela anda porque a lista foi RELIDA, não porque alguém carimbou o
+   *  veredito no objeto local. */
+  aoPostar: null as null | ((path: string, body: unknown) => void),
+  /** Projeção de `GET /api/alerts/<id>` — a única que assina a URL do frame.
+   *  A LISTA (`/alerts?...`) devolve só a chave, nunca a URL. */
+  detalhe: {
+    evidence_url: 'https://exemplo.invalido/frame.jpg',
+    violations: [
+      {
+        class: 'no_helmet',
+        confidence: 0.87,
+        bbox: [10, 20, 100, 200],
+        bbox_unidade: 'pixels_xywh_frame_original',
+      },
+    ],
+  } as unknown,
   pagina: {
     alerts: [] as unknown[],
     total: 0,
@@ -60,11 +79,18 @@ vi.mock('../../services/api', () => ({
     get: vi.fn((p: string) => {
       h.gets.push(p)
       if (h.falhar) return Promise.reject(new h.ApiErroFalso(500))
+      // `/alerts/<id>` (sem querystring) é o DETALHE — rota diferente da
+      // listagem, e a única que assina a URL da evidência.
+      if (/^\/alerts\/[^?]+$/.test(p)) {
+        return Promise.resolve({ success: true, data: { alert: h.detalhe } })
+      }
       return Promise.resolve({ success: true, data: h.pagina })
     }),
-    post: vi.fn((p: string) => {
+    post: vi.fn((p: string, body?: unknown) => {
       h.posts.push(p)
+      h.corpos.push(body)
       if (h.erroDoVeredito) return Promise.reject(h.erroDoVeredito)
+      h.aoPostar?.(p, body)
       return Promise.resolve({ success: true })
     }),
     downloadBlob: vi.fn(() => Promise.resolve(new Blob(['a']))),
@@ -181,6 +207,8 @@ beforeEach(() => {
   h.isSuperAdmin = false
   h.gets.length = 0
   h.posts.length = 0
+  h.corpos.length = 0
+  h.aoPostar = null
   h.falhar = false
   h.erroDoVeredito = null
   useToastStore.setState({ toasts: [] })
@@ -746,5 +774,202 @@ describe('vazio: a saída oferecida tem de sair do lugar (#771/#795)', () => {
       expect(screen.queryByRole('button', { name: /30 dias/ }), 'o botão sobreviveu ao próprio efeito').toBeNull(),
     )
     expect(screen.getByText(/O vazio é do acervo, não do filtro/)).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A gaveta de evidência — julgar SEM SAIR DA LISTA
+//
+// O pedido do dono, nas palavras dele: data e hora local, acesso rápido à
+// evidência para aprovar, "uma tela igual à da validação daquele momento —
+// foto do frame inteiro e zoom — para aprovar ou não aprovar", que contabilize
+// o evento, e a lista sempre da última para a primeira.
+//
+// Cada uma dessas seis coisas tem um caso abaixo, e cada caso FALHA se a
+// correspondente for revertida (conferido revertendo uma a uma).
+// ---------------------------------------------------------------------------
+
+const DIR_TELA = path.dirname(fileURLToPath(import.meta.url))
+
+/** Mensagem que o servidor devolve no 409 — diz QUEM julgou e QUANDO. */
+const FRASE_409 = 'Maria Silva já avaliou este alerta há 2 minutos'
+
+/** Abre a gaveta a partir da LINHA — é o caminho que o dono pediu. */
+async function abrirEvidencia(camera: string) {
+  fireEvent.click(within(linhaDe(camera)).getByRole('button', { name: /Ver evidência/ }))
+  return await screen.findByRole('dialog')
+}
+
+describe('a lista vai da última para a primeira, e diz a hora local', () => {
+  it('as linhas saem da captura mais NOVA para a mais antiga', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    // 14:32 · 14:20 · 14:07 · 13:44 — o backend já ordena assim
+    // (`ORDER BY a.timestamp DESC, a.id DESC`) e a tela não pode reembaralhar.
+    const texto = document.body.textContent ?? ''
+    const posicoes = ['CAM-04 Expedição', 'CAM-07 Linha 2', 'CAM-01 Doca Norte', 'CAM-04 Doca Sul']
+      .map((nome) => texto.indexOf(nome))
+    expect(posicoes.every((p) => p >= 0)).toBe(true)
+    expect([...posicoes].sort((a, b) => a - b)).toEqual(posicoes)
+  })
+
+  it('imprime a hora LOCAL de quem lê, nunca o carimbo cru do servidor', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const linha = linhaDe('CAM-04 Expedição').textContent ?? ''
+    expect(linha).toContain(new Date('2026-08-20T14:32:00').toLocaleString('pt-BR'))
+    expect(linha).not.toContain('2026-08-20T14:32:00')
+  })
+})
+
+describe('gaveta de evidência aberta da própria linha', () => {
+  it('busca a URL assinada do frame — a listagem não a tem, o detalhe assina', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    expect(h.gets).toContain('/alerts/e1')
+    const img = await within(gaveta).findByAltText('Frame da evidência')
+    expect(img.getAttribute('src')).toBe('https://exemplo.invalido/frame.jpg')
+  })
+
+  it('traz o frame INTEIRO e o zoom — a mesma leitura da tela de validação', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    expect(within(gaveta).getByRole('button', { name: 'Ampliar' })).toBeTruthy()
+    expect(within(gaveta).getByRole('button', { name: 'Reduzir' })).toBeTruthy()
+    expect(within(gaveta).getByText(/Frame inteiro/)).toBeTruthy()
+  })
+
+  it('a lupa é a MESMA das duas telas — nada de um segundo zoom copiado', () => {
+    // Zoom copiado diverge do outro no primeiro ajuste do limite de pan, e o
+    // defeito só aparece com a evidência ampliada a 8× — onde ninguém olha
+    // duas vezes. A cola do DOM mora em `useLupa`; a matemática, em
+    // `pages/epi/lupaEvidencia.ts`. Nenhuma das duas pode reaparecer na tela.
+    for (const arquivo of ['EventoDetalhe.tsx', 'PainelEvidencia.tsx']) {
+      const fonte = fs.readFileSync(path.join(DIR_TELA, arquivo), 'utf-8')
+      expect(fonte).toContain("from './useLupa'")
+      expect(fonte).not.toContain("addEventListener('wheel'")
+      expect(fonte).not.toContain('setPointerCapture')
+      expect(fonte).not.toContain('distanciaEntre')
+    }
+  })
+
+  it('fechar devolve a lista, que continua inteira atrás', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    fireEvent.click(within(gaveta).getByRole('button', { name: 'Fechar evidência' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByRole('table')).toBeTruthy()
+  })
+})
+
+describe('veredito pela gaveta — o que o dono chamou de "aprovar ou não aprovar"', () => {
+  it('confirmar registra o veredito do evento certo', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    fireEvent.click(within(gaveta).getByRole('button', { name: /Confirmar/ }))
+    await waitFor(() => expect(h.posts).toContain('/verification/e1/review'))
+    expect(h.corpos[0]).toEqual({ verdict: 'approve' })
+  })
+
+  it('rejeitar SEM motivo não manda nada — o motivo é o que ensina a recalibrar', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    fireEvent.click(within(gaveta).getByRole('button', { name: /Falso positivo/ }))
+    await screen.findByText('Selecione um motivo para rejeitar.')
+    expect(h.posts).toEqual([])
+  })
+
+  it('com motivo escolhido, a justificativa ESTRUTURADA viaja junto', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    fireEvent.change(within(gaveta).getByLabelText(/Motivo/), {
+      target: { value: 'epi_presente' },
+    })
+    fireEvent.click(within(gaveta).getByRole('button', { name: /Falso positivo/ }))
+    await waitFor(() => expect(h.posts).toContain('/verification/e1/review'))
+    expect(h.corpos[0]).toEqual({ verdict: 'reject', reason: 'epi_presente' })
+  })
+
+  it('ao decidir, AVANÇA para o próximo da lista sem fechar a gaveta', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    expect(within(gaveta).getByText('1 de 4 nesta página')).toBeTruthy()
+    fireEvent.click(within(gaveta).getByRole('button', { name: /Confirmar/ }))
+    // Ordem visível: 14:32 → 14:20 → 14:07 → 13:44.
+    await screen.findByText('2 de 4 nesta página')
+    expect(within(screen.getByRole('dialog')).getByText('CAM-07 LINHA 2')).toBeTruthy()
+  })
+
+  it('a releitura NÃO remonta a tabela — é assim que a posição na lista fica', async () => {
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const tabelaAntes = screen.getByRole('table')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    fireEvent.click(within(gaveta).getByRole('button', { name: /Confirmar/ }))
+    // 1) lista inicial 2) detalhe do evento aberto 3) releitura pós-veredito.
+    await waitFor(() => expect(h.gets.length).toBe(3))
+    // A MESMA tabela, o MESMO nó do documento. Se o veredito acendesse o
+    // carregamento de tela inteira, a tabela seria desmontada e remontada — e
+    // com ela iriam embora a rolagem e a linha onde a pessoa estava. É esse o
+    // "sair da lista" que esta rodada existe para matar; comparar o nó é o
+    // único jeito de provar que ele não aconteceu (depois que tudo assenta,
+    // as duas versões desenham a mesma coisa).
+    expect(screen.getByRole('table')).toBe(tabelaAntes)
+    expect(screen.queryByText('CARREGANDO EVENTOS')).toBeNull()
+  })
+
+  it('a contagem de trabalho que sobra cai NA HORA, e por releitura do servidor', async () => {
+    // e1 e e4 sem veredito humano + e2 (veredito da IA, que não conta como
+    // gente) = 3. e3 já tem veredito de pessoa.
+    h.aoPostar = (p) => {
+      if (!p.startsWith('/verification/e1/')) return
+      const alerts = (h.pagina.alerts as Array<Record<string, unknown>>).map((a) =>
+        a.id === 'e1' ? { ...a, verification_verdict: 'approve', verified_by: 'user:eu' } : a,
+      )
+      h.pagina = { ...h.pagina, alerts }
+    }
+    montar()
+    await screen.findByText('3 SEM VEREDITO NESTA PÁGINA')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    fireEvent.click(within(gaveta).getByRole('button', { name: /Confirmar/ }))
+    expect(await screen.findByText('2 SEM VEREDITO NESTA PÁGINA')).toBeTruthy()
+  })
+
+  it('409 (outra pessoa julgou primeiro) informa e AVANÇA — não prende o operador', async () => {
+    h.erroDoVeredito = new h.ApiErroFalso(409, FRASE_409)
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    fireEvent.click(within(gaveta).getByRole('button', { name: /Confirmar/ }))
+    await waitFor(() => {
+      const toasts = useToastStore.getState().toasts
+      expect(toasts.some((x) => x.variant === 'info' && x.description === FRASE_409)).toBe(true)
+      expect(toasts.some((x) => x.variant === 'error')).toBe(false)
+    })
+    expect(await screen.findByText('2 de 4 nesta página')).toBeTruthy()
+  })
+
+  it('evento já julgado por gente mostra o veredito registrado, não botões', async () => {
+    montar()
+    await screen.findByText('CAM-07 Linha 2')
+    const gaveta = await abrirEvidencia('CAM-07 Linha 2')
+    expect(within(gaveta).getByText('Procedente')).toBeTruthy()
+    expect(within(gaveta).queryByRole('button', { name: /Confirmar/ })).toBeNull()
+  })
+
+  it('sem alerts:feedback a gaveta abre para VER, e diz por que não dá para julgar', async () => {
+    h.permissoes = ['alerts:read']
+    montar()
+    await screen.findByText('CAM-04 Expedição')
+    const gaveta = await abrirEvidencia('CAM-04 Expedição')
+    expect(within(gaveta).queryByRole('button', { name: /Confirmar/ })).toBeNull()
+    expect(within(gaveta).getByText(/não tem permissão para julgar/)).toBeTruthy()
   })
 })

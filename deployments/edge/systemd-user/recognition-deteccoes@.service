@@ -1,0 +1,41 @@
+[Unit]
+# Publicador: dump KITTI do DeepStream → det:{camera_id} no Redis local.
+# %i = mesmo nome de instância da recognition-infer@%i (epi, quality, ...).
+#
+# Unit SEPARADA da inferência de propósito: reiniciar o publicador (ajuste de
+# limiar, troca de mapa de taxonomia) não pode derrubar o pipeline DeepStream,
+# que leva dezenas de segundos para reconectar 28 streams RTSP.
+Description=Recognition publicador de detecções [%i] (KITTI -> det:{camera_id})
+After=recognition-redis.service recognition-infer@%i.service
+Wants=recognition-redis.service
+
+[Service]
+Type=simple
+# EnvironmentFile só para EDGE_REDIS_URL/paths — nenhum segredo é usado aqui
+# (o publicador não fala com o gravador nem com a nuvem).
+EnvironmentFile=%h/.config/recognition/edge-sync-agent.env
+WorkingDirectory=%h/.config/recognition/deepstream
+# Roda do release ATIVO (o symlink `current` que o OTA troca), para que uma
+# release nova traga também o publicador — mesma lógica das units secundárias
+# em OTA_SECONDARY_UNIT_NAMES. `current` aponta para
+# releases/<ref>/services/edge-sync-agent, e o script vive em
+# releases/<ref>/deployments/edge/ — daí o ../../.
+# O interpretador é a venv do release: é a única com `redis` instalado.
+ExecStart=%h/recognition/current/.venv/bin/python \
+    %h/recognition/current/../../deployments/edge/publicar_deteccoes.py \
+    --fontes %h/.config/recognition/deepstream/fontes_%i.json \
+    --mapa-taxonomia %h/recognition/models/mapa_taxonomia_%i.json \
+    --kitti-dir /dev/shm/recognition-kitti-%i
+Restart=always
+RestartSec=5
+
+StandardOutput=append:%h/recognition/logs/deteccoes-%i.log
+StandardError=append:%h/recognition/logs/deteccoes-%i.log
+
+# Auxiliar: sacrificável antes do pipeline. Só lê arquivinhos e publica.
+MemoryHigh=128M
+MemoryMax=256M
+OOMScoreAdjust=200
+
+[Install]
+WantedBy=default.target
