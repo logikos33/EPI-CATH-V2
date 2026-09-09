@@ -65,6 +65,7 @@ import { rotaHomeDoUsuario } from '../RotasNovas'
 import { LogikosLoader } from '../shell/LogikosLoader'
 import { lk } from '../tokens/lk.css'
 import * as s from './Carga.css'
+import { isInTenantContext } from '../../services/tenantContext'
 
 // ── Rotas reais ─────────────────────────────────────────────────────────────
 
@@ -354,7 +355,7 @@ export function Carga() {
   // ver app/shell/becoSemSaida.test.tsx. `falhou`/`conteudo*` ficam de fora
   // porque só rodam DEPOIS do cabeçalho com Voltar já estar na árvore.
   const voltarCentro = (
-    <Link to={rotaHomeDoUsuario(isSuperAdmin)} className={s.voltar}>
+    <Link to={rotaHomeDoUsuario(isSuperAdmin, isInTenantContext())} className={s.voltar}>
       <ArrowLeft size={16} strokeWidth={1.7} aria-hidden="true" />
       Voltar
     </Link>
@@ -914,7 +915,7 @@ export function Carga() {
         {/* Sem barra lateral própria (SEM_BARRA_LATERAL): sem este link não há
             caminho de volta nenhum — regra global, ver
             app/shell/becoSemSaida.test.tsx. */}
-        <Link to={rotaHomeDoUsuario(isSuperAdmin)} className={s.voltar}>
+        <Link to={rotaHomeDoUsuario(isSuperAdmin, isInTenantContext())} className={s.voltar}>
           <ArrowLeft size={16} strokeWidth={1.7} aria-hidden="true" />
           Voltar
         </Link>
