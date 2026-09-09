@@ -27,6 +27,12 @@
  * NÃO é `training:approve`: aquilo é aprovar treinamento, outra coisa, e por
  * ser só-superadmin deixava o admin da RVB — quem conhece a área — sem editar.
  *
+ * Rótulo do modelo no seletor: `rotuloModelo` (services/modelDisplay.ts) —
+ * nome · quantas classes · quando. O nome cru não identificava nada: o
+ * cliente via todos como "Logikos" e o superadmin via "<motor> - Job <hash>".
+ * A contagem só aparece quando é do MODELO (`classesDeclaradas`); o catálogo
+ * do tenant segue sendo fallback de nomes para os chips, não uma medida.
+ *
  * Honestidade (está na TELA, não só aqui): o escopo de classes vale hoje no
  * shadow E no worker cloud, que passou a descartar detecção fora do escopo
  * antes de virar violação (tasks/inference.py::_no_escopo_da_camera). O box
@@ -36,7 +42,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../../services/api'
 import { cameraService } from '../../services/cameraService'
-import { nomeInternoOuCliente } from '../../services/modelDisplay'
+import { dataCurta, rotuloModelo } from '../../services/modelDisplay'
 import { useToast } from '../ui/Toast/useToast'
 import { useAuth } from '../../hooks/useAuth'
 import { Badge } from '../ui/Badge/Badge'
@@ -236,13 +242,22 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
   const [loading, setLoading] = useState(true)
   const [cameras, setCameras] = useState<Camera[]>([])
   const [models, setModels] = useState<RegistryModel[]>([])
-  const [classesByModel, setClassesByModel] = useState<Record<string, string[]>>({})
+  // Guarda as classes que o modelo DECLARA (pode ser vazio), não já
+  // misturadas com o catálogo: é o que permite o rótulo dizer "10 classes"
+  // só quando o número é do modelo. O catálogo continua entrando como
+  // fallback de NOMES para os chips, agora em `classesOferecidas`.
+  const [classesDeclaradas, setClassesDeclaradas] = useState<Record<string, string[]>>({})
   const [deploymentByCamera, setDeploymentByCamera] = useState<Record<string, ModelDeployment>>({})
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
   const [saving, setSaving] = useState<string | null>(null)
   const [erro, setErro] = useState<string | null>(null)
+  const [avisoAberto, setAvisoAberto] = useState(false)
 
   const fallback = useMemo(() => classesCatalogo.map(c => c.name), [classesCatalogo])
+  const classesOferecidas = (modelId: string) => {
+    const declaradas = classesDeclaradas[modelId]
+    return declaradas?.length ? declaradas : fallback
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -271,7 +286,11 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
       const porModelo: Record<string, string[]> = {}
       details.forEach((r, i) => {
         const d = r.status === 'fulfilled' ? r.value.data : undefined
-        porModelo[comArtefato[i].id] = classesDoModelo(d?.lineage?.dataset_version?.class_distribution, fallback)
+        // Fallback VAZIO: aqui é o que o modelo declara. Modelo que não
+        // declara (ou detalhe que falhou) fica sem número no rótulo — o
+        // catálogo do tenant vira nome de chip em `classesOferecidas`, nunca
+        // uma contagem atribuída a este modelo.
+        porModelo[comArtefato[i].id] = classesDoModelo(d?.lineage?.dataset_version?.class_distribution, [])
       })
       const porCamera: Record<string, ModelDeployment> = {}
       porModulo.forEach((r, i) => {
@@ -290,7 +309,7 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
       }
       setCameras(ativas)
       setModels(comArtefato)
-      setClassesByModel(porModelo)
+      setClassesDeclaradas(porModelo)
       setDeploymentByCamera(porCamera)
       setDrafts(novos)
     } catch (err) {
@@ -340,10 +359,20 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
     ...cell, fontSize: 11, fontWeight: 600, textTransform: 'uppercase',
     letterSpacing: '0.05em', color: vars.color.textMuted, textAlign: 'left',
   }
+  // `width:100%` + `minWidth:0` em vez de `minWidth:220`: a largura natural de
+  // um <select> é a da MAIOR opção, então o rótulo longo (nome · classes ·
+  // data) empurrava a tabela para além da tela e a última coluna ficava
+  // cortada na borda. Com a tabela em `table-layout: fixed`, o seletor cabe na
+  // célula e o texto que sobra vira reticências do próprio navegador.
   const selectStyle: React.CSSProperties = {
     background: vars.color.bgSurface, border: `1px solid ${vars.color.borderStrong}`,
     borderRadius: 6, color: vars.color.textPrimary, padding: '6px 10px', fontSize: 13,
-    minWidth: 220, cursor: podeEditar ? 'pointer' : 'default',
+    width: '100%', minWidth: 0, cursor: podeEditar ? 'pointer' : 'default',
+  }
+  /** Uma linha que trunca com reticências — padrão da casa (`admin/Usuarios`):
+   * o texto inteiro fica no `title`, então truncar não esconde informação. */
+  const truncado: React.CSSProperties = {
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
   }
 
   if (loading) {
@@ -361,23 +390,50 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
 
   return (
     <div style={{ background: vars.color.bgElevated, borderRadius: 8, overflowX: 'auto' }}>
+      {/* O texto integral (8 linhas) empurrava a tabela para fora da primeira
+          tela toda vez que alguém abria a aba. Ele diz o que ninguém pode
+          deixar de ler UMA vez — capacidade ≠ exigência — mas não precisa ser
+          relido a cada visita: fica a distinção em uma linha e "Entenda"
+          revela o texto original, palavra por palavra. */}
       <Banner variant="warning">
-        O escopo abaixo é uma <strong>sugestão derivada de evidência</strong> (classe com ≥10 anotações
-        humanas naquela câmera + protetor auditivo universal): é a CAPACIDADE do modelo ali, não a
-        EXIGÊNCIA do cliente. Será substituído pela matriz de exigência da RVB assim que ela ficar
-        pronta — até lá, uma área sem nenhuma luva anotada hoje fica sem escopo de luvas, e nenhuma
-        violação de luva seria vista nela. Se uma classe que devia estar marcada não aparece aqui, é
-        porque falta anotação dela nesta câmera — fale com quem cuida do treinamento. Onde este
-        escopo já vale: no shadow sobre os frames que o equipamento envia e no reconhecimento que
-        roda na nuvem, que já descarta detecção fora do escopo antes de virar violação. O
-        equipamento instalado no site ainda NÃO aplica esse recorte por câmera — essa parte segue
-        pendente.
-        {isSuperAdmin && (
-          <>
-            {' '}
-            {/* jargao-ok: modo avançado (superadmin) — referência de implementação, só quem mexe no código precisa disto */}
-            <span style={{ opacity: 0.72 }}>{'Detalhe técnico: aplica em tasks/inference.py::_no_escopo_da_camera · pendências nas issues #519 (equipamento do site) e #535 (matriz de exigência).'}</span>
-          </>
+        <span>
+          O escopo abaixo é a <strong>capacidade</strong> do modelo em cada câmera — não é a{' '}
+          <strong>exigência</strong> do cliente.{' '}
+        </span>
+        <Button
+          size="sm"
+          variant="ghost"
+          // `color: inherit` porque o ghost pinta com `textMuted`, que dentro
+          // do aviso (fundo âmbar, texto âmbar) fica cinza apagado e passa por
+          // botão desabilitado — justamente o que ninguém clicaria.
+          style={{ color: 'inherit', textDecoration: 'underline', padding: '0 6px' }}
+          aria-expanded={avisoAberto}
+          onClick={() => setAvisoAberto(v => !v)}
+        >
+          {avisoAberto ? 'Ocultar' : 'Entenda'}
+        </Button>
+        {/* `span` em bloco, não `<p>`: o Banner já embrulha o conteúdo num
+            `span` (conteúdo de frase) e um `p` dentro dele é HTML inválido. */}
+        {avisoAberto && (
+          <span style={{ display: 'block', marginTop: 8 }}>
+            O escopo abaixo é uma <strong>sugestão derivada de evidência</strong> (classe com ≥10 anotações
+            humanas naquela câmera + protetor auditivo universal): é a CAPACIDADE do modelo ali, não a
+            EXIGÊNCIA do cliente. Será substituído pela matriz de exigência da RVB assim que ela ficar
+            pronta — até lá, uma área sem nenhuma luva anotada hoje fica sem escopo de luvas, e nenhuma
+            violação de luva seria vista nela. Se uma classe que devia estar marcada não aparece aqui, é
+            porque falta anotação dela nesta câmera — fale com quem cuida do treinamento. Onde este
+            escopo já vale: no shadow sobre os frames que o equipamento envia e no reconhecimento que
+            roda na nuvem, que já descarta detecção fora do escopo antes de virar violação. O
+            equipamento instalado no site ainda NÃO aplica esse recorte por câmera — essa parte segue
+            pendente.
+            {isSuperAdmin && (
+              <>
+                {' '}
+                {/* jargao-ok: modo avançado (superadmin) — referência de implementação, só quem mexe no código precisa disto */}
+                <span style={{ opacity: 0.72 }}>{'Detalhe técnico: aplica em tasks/inference.py::_no_escopo_da_camera · pendências nas issues #519 (equipamento do site) e #535 (matriz de exigência).'}</span>
+              </>
+            )}
+          </span>
         )}
       </Banner>
       <div style={{ padding: '10px 12px', fontSize: 12, color: vars.color.textMuted, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
@@ -385,7 +441,19 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
         {!podeEditar && <span style={{ color: vars.color.warning }}>(somente leitura — requer permissão de aprovação)</span>}
         {models.length === 0 && <span style={{ color: vars.color.warning }}>Nenhum modelo pronto para uso neste tenant.</span>}
       </div>
-      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      {/* `table-layout: fixed` + larguras em % = as 5 colunas cabem na largura
+          disponível; sem isso o conteúdo (seletor e chips) dita a largura, a
+          tabela passa da tela e "Último deploy" fica cortado na borda.
+          `minWidth` mantém a tabela legível em tela estreita — aí sim o
+          contêiner rola, de propósito. */}
+      <table style={{ width: '100%', minWidth: 720, tableLayout: 'fixed', borderCollapse: 'collapse' }}>
+        <colgroup>
+          <col style={{ width: '16%' }} />
+          <col style={{ width: '26%' }} />
+          <col style={{ width: '30%' }} />
+          <col style={{ width: '12%' }} />
+          <col style={{ width: '16%' }} />
+        </colgroup>
         <thead>
           <tr>
             <th style={th}>Câmera</th>
@@ -402,16 +470,16 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
             const modulo = moduloDaCamera(cam)
             const modelosDoModulo = models.filter(m => (m.module_code || MODULO_PADRAO) === modulo)
             const model = models.find(m => m.id === draft.modelId)
-            const todas = draft.modelId ? classesByModel[draft.modelId] ?? fallback : []
+            const todas = draft.modelId ? classesOferecidas(draft.modelId) : []
             const base = draftDoDeployment(dep)
             const mudou = draft.modelId !== base.modelId || !mesmoConjunto(draft.classes, base.classes)
             const podeSalvar = podeEditar && saving !== cam.id && mudou && !!draft.modelId && draft.classes.length > 0
             const framework = model?.framework ? FRAMEWORK_LABELS[model.framework] ?? model.framework : null
             return (
               <tr key={cam.id}>
-                <td style={cell}>{cam.name}</td>
+                <td style={{ ...cell, ...truncado }} title={cam.name}>{cam.name}</td>
                 <td style={cell}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                     <select
                       aria-label={`Modelo da câmera ${cam.name}`}
                       value={draft.modelId}
@@ -419,13 +487,15 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
                       style={selectStyle}
                       onChange={e => {
                         const id = e.target.value
-                        setDraft(cam.id, { modelId: id, classes: id ? [...(classesByModel[id] ?? fallback)] : [] })
+                        setDraft(cam.id, { modelId: id, classes: id ? [...classesOferecidas(id)] : [] })
                       }}
                     >
                       {/* Sem rota de desativar: com deployment gravado, "sem" não é escolha válida. */}
                       <option value="" disabled={!!dep}>— sem deployment (detector padrão do ambiente)</option>
                       {modelosDoModulo.map(m => (
-                        <option key={m.id} value={m.id}>{nomeInternoOuCliente(m, isSuperAdmin)}</option>
+                        <option key={m.id} value={m.id}>
+                          {rotuloModelo(m, isSuperAdmin, classesDeclaradas[m.id]?.length)}
+                        </option>
                       ))}
                     </select>
                     {modulo !== MODULO_PADRAO && <Badge variant="neutral">{modulo}</Badge>}
@@ -450,14 +520,23 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
                     <span style={{ color: vars.color.textMuted }}>—</span>
                   )}
                 </td>
-                <td style={{ ...cell, color: vars.color.textMuted, whiteSpace: 'nowrap' }}>
-                  {dep ? new Date(dep.created_at).toLocaleString('pt-BR') : '—'}
+                {/* Data curta na célula, data completa no `title`: o formato
+                    longo ("21/08/2026 07:00:00") era o que mais alargava a
+                    coluna, e o segundo do deploy não muda decisão nenhuma. */}
+                <td
+                  style={{ ...cell, ...truncado, color: vars.color.textMuted }}
+                  title={dep ? new Date(dep.created_at).toLocaleString('pt-BR') : undefined}
+                >
+                  {(dep && dataCurta(dep.created_at)) || '—'}
                 </td>
                 <td style={cell}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'flex-start' }}>
+                    {/* nowrap só no BOTÃO (o motivo abaixo pode quebrar em duas
+                        linhas): coluna estreita não pode partir "Salvar". */}
                     <Button
                       size="sm"
                       variant="primary"
+                      style={{ whiteSpace: 'nowrap' }}
                       aria-label={`Salvar escopo de ${cam.name}`}
                       disabled={!podeSalvar}
                       loading={saving === cam.id}

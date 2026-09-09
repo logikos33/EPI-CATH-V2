@@ -248,3 +248,70 @@ def test_channel_resolution_failure_reports_specific_no_channel_reason():
     assert result["reason"] == "no_channel"
     assert "fora do channel_map" in result["detail"]
     assert executor.circuit_open is False  # não é auth — breaker intacto
+
+
+# ── evidência de alerta (capture_evidence) ──────────────────────────────────
+#
+# O caminho que faz o alerta do box chegar COM frame: mesma captura, mesmo
+# breaker, rota /evidence, e o retorno é a chave R2 (que só a nuvem sabe — o
+# box não tem, nem terá, credencial de R2).
+
+def _http_created(r2_key="evidence/cam-1/20260909T041800000000.jpg"):
+    resp = MagicMock()
+    resp.status_code = 201
+    resp.json.return_value = {"success": True, "data": {"r2_key": r2_key}}
+    return resp
+
+
+def test_capture_evidence_devolve_r2_key_da_nuvem():
+    recorder = MagicMock()
+    recorder.get_snapshot.return_value = b"jpeg-bytes"
+    http = MagicMock()
+    http.post.return_value = _http_created()
+    executor = _make_executor(recorder, http)
+
+    assert executor.capture_evidence("cam-1") == "evidence/cam-1/20260909T041800000000.jpg"
+    url, _kwargs = http.post.call_args
+    assert url[0] == "http://cloud.test/api/v1/edge/cameras/cam-1/evidence"
+
+
+def test_capture_evidence_sem_sinal_devolve_none_sem_levantar():
+    """Evidência é desejável, não pode bloquear o alerta."""
+    recorder = MagicMock()
+    recorder.get_snapshot.side_effect = RecorderError("sem sinal no canal")
+    executor = _make_executor(recorder)
+
+    assert executor.capture_evidence("cam-1") is None
+
+
+def test_capture_evidence_auth_abre_o_mesmo_breaker_do_snapshot():
+    """Anti-lockout: credencial rejeitada na evidência para TAMBÉM o snapshot."""
+    recorder = MagicMock()
+    recorder.get_snapshot.side_effect = RecorderAuthError("401 Unauthorized")
+    executor = _make_executor(recorder)
+
+    assert executor.capture_evidence("cam-1") is None
+    assert executor.circuit_open is True
+    assert executor.capture_and_upload("cam-2") == {
+        "ok": False, "reason": "auth", "detail": "401 Unauthorized",
+    }
+    recorder.get_snapshot.assert_called_once()  # nunca tocou o gravador de novo
+
+
+def test_capture_evidence_com_breaker_aberto_nao_toca_o_gravador():
+    recorder = MagicMock()
+    executor = _make_executor(recorder)
+    executor._trip_circuit("credencial rejeitada")
+
+    assert executor.capture_evidence("cam-1") is None
+    recorder.get_snapshot.assert_not_called()
+
+
+def test_capture_evidence_upload_rejeitado_devolve_none():
+    recorder = MagicMock()
+    recorder.get_snapshot.return_value = b"jpeg-bytes"
+    http = MagicMock()
+    http.post.return_value = _http_rejected(502)  # R2 fora do ar
+    executor = _make_executor(recorder, http)
+
+    assert executor.capture_evidence("cam-1") is None

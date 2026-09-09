@@ -312,7 +312,16 @@ def build_sync_loops_from_env(
     }
     # Produtor do caminho detecções→cloud (det:* local → o MESMO buffer que o
     # uploader drena). Opt-in por EDGE_REDIS_URL — sem ela, os 4 loops de sempre.
-    relay = build_detection_relay_from_env(buffer)
+    # A evidência sai do MESMO SnapshotExecutor do comando de snapshot: mesmo
+    # gravador, mesmo upload multipart e — o que importa — o MESMO circuit
+    # breaker anti-lockout. Uma credencial rejeitada em qualquer um dos dois
+    # caminhos para os dois (CLAUDE.md: o gravador pune tentativa repetida).
+    relay = build_detection_relay_from_env(
+        buffer,
+        evidence_capture=(
+            snapshot_executor.capture_evidence if snapshot_executor is not None else None
+        ),
+    )
     if relay is not None:
         loops["detection_relay"] = relay
     return loops
