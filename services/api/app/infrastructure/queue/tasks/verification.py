@@ -69,8 +69,16 @@ Diretrizes:
 def _call_claude(camera_id: str, class_name: str, confidence: float, module_code: str) -> dict:
     """Chama Claude claude-haiku-4-5-20251001 para análise de detecção."""
     if not _ANTHROPIC_KEY:
+        # ⛔ `reason` é CAMPO DE TELA: sai na Verificação como "Motivo da IA" e
+        # na lista de Eventos sob o selo de veredito. Falha de infraestrutura
+        # não é raciocínio da IA — escrever "API key não configurada" ali põe
+        # um problema nosso na cara do operador como se fosse análise.
+        # Medido em 09/09: 592 alertas com esse texto gravado.
+        # O veredito `needs_human` já diz tudo que o operador precisa saber
+        # (alguém tem de olhar); o PORQUÊ técnico vive no log, que é onde
+        # quem opera a plataforma procura.
         logger.warning("anthropic_key_missing: defaulting to needs_human")
-        return {"verdict": "needs_human", "reason": "API key não configurada", "adjusted_confidence": confidence}
+        return {"verdict": "needs_human", "reason": "", "adjusted_confidence": confidence}
 
     try:
         import anthropic  # noqa: PLC0415
@@ -97,11 +105,16 @@ def _call_claude(camera_id: str, class_name: str, confidence: float, module_code
         return result
 
     except json.JSONDecodeError as exc:
+        # Mesma regra do `_ANTHROPIC_KEY` acima: o operador vê `needs_human`,
+        # o motivo técnico fica no log.
         logger.error("claude_json_parse_error: %s", exc)
-        return {"verdict": "needs_human", "reason": "Erro ao parsear resposta IA", "adjusted_confidence": confidence}
+        return {"verdict": "needs_human", "reason": "", "adjusted_confidence": confidence}
     except Exception as exc:
+        # ⛔ `f"Erro IA: {exc}"` ia direto para uma coluna que a tela mostra —
+        # mensagem de exceção pode carregar host, caminho ou trecho de payload.
+        # Erro nunca vira conteúdo de tela.
         logger.error("claude_call_error: %s", exc)
-        return {"verdict": "needs_human", "reason": f"Erro IA: {exc}", "adjusted_confidence": confidence}
+        return {"verdict": "needs_human", "reason": "", "adjusted_confidence": confidence}
 
 
 def _update_alert_verification(
