@@ -11,6 +11,7 @@ Import de onnxruntime/numpy é LAZY e gracioso: worker sem as libs (image
 da API não instala ML) NÃO quebra — task retorna status 'skipped' com
 warning e a validação fica pendente (metrics.validated não é gravado).
 """
+import hashlib
 import logging
 import os
 import tempfile
@@ -161,3 +162,68 @@ def validate_onnx(self, model_id: str) -> dict:
                 os.unlink(tmp_path)
             except OSError as unlink_exc:
                 logger.debug("validate_onnx_tmp_cleanup_failed: %s", unlink_exc)
+
+
+@celery.task(
+    bind=True,
+    max_retries=2,
+    queue="inference",
+    name="tasks.model_validation.record_onnx_digest",
+)
+def record_onnx_digest(self, model_id: str) -> dict:
+    """Grava o SHA-256 REAL do artefato ONNX em trained_models.metrics.
+
+    POR QUE existe: o config/poll do edge só manda o manifesto de modelo ao
+    box quando conhece o digest do artefato — `ModelManifest.sha256` é o que o
+    agente usa para saber se já tem aquele modelo e para conferir o download.
+    O registry não tem coluna de digest e o ONNX é enviado ao R2 pelo PRÓPRIO
+    pod da RunPod (presigned PUT), então a API nunca vê os bytes no caminho de
+    treino. Esta task é o único ponto onde o digest passa a existir; sem ela o
+    manifesto seria omitido para sempre — e inventar um hash de identidade no
+    lugar dele plantaria uma armadilha (pareceria digest e reprovaria todo
+    download no dia em que alguém o conferisse).
+
+    Idempotente: com `metrics.onnx_sha256` já gravado, não baixa nada.
+
+    ponytail: baixa o ONNX inteiro para hashear. Se algum dia o digest vier do
+    próprio treino (o pod já tem os bytes na mão), esta task some.
+    """
+    repo = _get_registry_repo()
+    model = repo.get_by_id(model_id)
+    if model is None:
+        logger.error("record_onnx_digest_model_not_found: model=%s", model_id)
+        return {"status": "error", "model_id": model_id, "reason": "model_not_found"}
+
+    metrics = model.get("metrics") or {}
+    if isinstance(metrics, dict) and metrics.get("onnx_sha256"):
+        return {
+            "status": "skipped",
+            "model_id": model_id,
+            "reason": "already_recorded",
+            "sha256": metrics["onnx_sha256"],
+        }
+
+    onnx_key = model.get("r2_onnx_key")
+    if not onnx_key:
+        logger.warning(
+            "record_onnx_digest_sem_artefato: model=%s — r2_onnx_key ausente, "
+            "modelo não pode ser propagado ao edge", model_id,
+        )
+        return {"status": "failed", "model_id": model_id, "reason": "missing_onnx_key"}
+
+    try:
+        data = _get_storage(model.get("tenant_id")).download_bytes(onnx_key)
+    except Exception as exc:
+        logger.error(
+            "record_onnx_digest_download_falhou: model=%s key=%s err=%s",
+            model_id, onnx_key, exc,
+        )
+        return {"status": "failed", "model_id": model_id, "reason": "download_failed"}
+
+    sha256 = hashlib.sha256(data).hexdigest()
+    repo.merge_metrics(model_id, {"onnx_sha256": sha256, "onnx_bytes": len(data)})
+    logger.info(
+        "record_onnx_digest_ok: model=%s sha256=%s bytes=%d",
+        model_id, sha256[:12], len(data),
+    )
+    return {"status": "completed", "model_id": model_id, "sha256": sha256}
