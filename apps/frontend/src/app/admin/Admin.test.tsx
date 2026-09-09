@@ -8,6 +8,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const auth = vi.hoisted(() => ({ can: vi.fn((_p: string) => true), isSuperAdmin: true }))
 vi.mock('../../hooks/useAuth', () => ({ useAuth: () => auth }))
+vi.mock('../../services/tenantContext', () => ({
+  isInTenantContext: () => false,
+  getSessionTokenExpMs: () => null,
+}))
 
 import { Admin } from './Admin'
 

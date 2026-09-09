@@ -74,6 +74,34 @@ class ModelDeploymentRepository(BaseRepository):
             (str(tenant_id), module_code),
         )
 
+    def list_active_for_site(
+        self, site_id: str, tenant_id: str
+    ) -> list[dict[str, Any]]:
+        """Deployments ATIVOS das câmeras de um site + artefato do modelo.
+
+        Usado pelo config/poll do edge para montar o manifesto de modelo que o
+        `ConfigPoller` do agente consome. Devolve, por câmera+módulo, o modelo
+        ativo mais recente com a chave R2 do ONNX, o framework e `metrics`
+        (de onde sai `onnx_sha256` — o digest REAL do artefato).
+
+        DISTINCT ON (camera_id, module_code) reproduz a semântica de
+        `get_active_for_camera` (ORDER BY created_at DESC LIMIT 1) numa ida só
+        ao banco — o mesmo motivo de `list_active_for_tenant` existir (o pool
+        estourou com um GET por câmera nas 28 do RVB).
+        """
+        return self._execute(
+            "SELECT DISTINCT ON (md.camera_id, md.module_code) "
+            "       md.camera_id, md.module_code, md.model_id, "
+            "       tm.r2_onnx_key, tm.framework, tm.metrics "
+            "FROM model_deployments md "
+            "JOIN cameras c ON c.id = md.camera_id "
+            "JOIN trained_models tm ON tm.id = md.model_id "
+            "WHERE c.site_id = %s AND md.tenant_id = %s AND c.tenant_id = %s "
+            "  AND md.status = 'active' "
+            "ORDER BY md.camera_id, md.module_code, md.created_at DESC",
+            (str(site_id), str(tenant_id), str(tenant_id)),
+        )
+
     def list_for_camera(
         self, tenant_id: str, camera_id: UUID, module_code: Optional[str] = None
     ) -> list[dict[str, Any]]:
