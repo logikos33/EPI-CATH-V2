@@ -55,9 +55,9 @@ beforeEach(() => {
   mocks.get.mockImplementation(async (path: string) => {
     if (path === '/v1/models') {
       return { success: true, data: { models: [
-        { id: 'm-v9', name: 'rvb-v9', framework: 'rfdetr', r2_onnx_key: 'models/x/v9.onnx', is_active: true, module_code: 'epi' },
+        { id: 'm-v9', name: 'rvb-v9', framework: 'rfdetr', r2_onnx_key: 'models/x/v9.onnx', is_active: true, module_code: 'epi', created_at: '2026-08-25T06:45:00Z' },
         { id: 'm-semonnx', name: 'sem-artefato', framework: 'yolox', r2_onnx_key: null, is_active: false, module_code: 'epi' },
-        { id: 'm-q1', name: 'qualidade-v1', framework: 'rfdetr', r2_onnx_key: 'models/x/q1.onnx', is_active: true, module_code: 'quality' },
+        { id: 'm-q1', name: 'qualidade-v1', framework: 'rfdetr', r2_onnx_key: 'models/x/q1.onnx', is_active: true, module_code: 'quality', created_at: '2026-08-25T06:45:00Z' },
       ] } }
     }
     if (path === '/v1/models/m-v9') {
@@ -294,7 +294,9 @@ describe('CameraModelScope — anti-vazamento de stack interno (política F5-LEV
 
     const sel = await screen.findByLabelText('Modelo da câmera Canal 8') as HTMLSelectElement
     const opt = Array.from(sel.options).find(o => o.value === 'm-leak')!
-    expect(opt.textContent).toBe('Logikos')
+    // "Logikos" sozinho é o mesmo rótulo para TODO modelo não rebatizado — o
+    // que separa um treino do outro é a contagem (e a data, quando vem).
+    expect(opt.textContent).toBe('Logikos · 1 classe')
     expect(document.body.innerHTML).not.toMatch(/yolo|rf-?detr|onnx/i)
   })
 
@@ -305,7 +307,7 @@ describe('CameraModelScope — anti-vazamento de stack interno (política F5-LEV
 
     const sel = await screen.findByLabelText('Modelo da câmera Canal 8') as HTMLSelectElement
     const opt = Array.from(sel.options).find(o => o.value === 'm-leak')!
-    expect(opt.textContent).toBe('Logikos V1')
+    expect(opt.textContent).toBe('Logikos V1 · 1 classe')
   })
 
   it('superadmin: continua vendo nome e framework internos — não regressão da engenharia', async () => {
@@ -315,8 +317,94 @@ describe('CameraModelScope — anti-vazamento de stack interno (política F5-LEV
 
     const sel = await screen.findByLabelText('Modelo da câmera Canal 8') as HTMLSelectElement
     const opt = Array.from(sel.options).find(o => o.value === 'm-leak')!
-    expect(opt.textContent).toBe(MODELO_INTERNO.name)
+    expect(opt.textContent).toBe(`${MODELO_INTERNO.name} · 1 classe`)
     expect(screen.getAllByText('YOLOX').length).toBeGreaterThan(0)
+  })
+})
+
+describe('CameraModelScope — o operador tem de saber QUAL modelo é', () => {
+  it('rótulo do modelo: nome + quantas classes + quando (não só o id do job)', async () => {
+    render(<CameraModelScope classesCatalogo={[]} />)
+    const sel = await screen.findByLabelText('Modelo da câmera Canal 8') as HTMLSelectElement
+
+    const opt = Array.from(sel.options).find(o => o.value === 'm-v9')!
+    // 3 = as classes que o modelo DE FATO prevê (Colete está em
+    // __sem_suporte_treino__ e não conta). Data sem fuso fixo no rótulo, por
+    // isso a forma e não o valor — o valor exato é `dataCurta` em
+    // services/modelDisplay.test.ts.
+    expect(opt.textContent).toMatch(/^rvb-v9 · 3 classes · \d{2}\/\d{2}\/\d{2} \d{2}h\d{2}$/)
+  })
+
+  it('modelo que não declara classes: rótulo SEM contagem — o catálogo do tenant não vira medida do modelo', async () => {
+    mocks.list.mockResolvedValue([{ id: 'cam-1', name: 'Canal 8', is_active: true, active_module: 'epi' }])
+    mocks.get.mockImplementation(async (path: string) => {
+      if (path === '/v1/models') {
+        return { success: true, data: { models: [
+          { id: 'm-mudo', name: 'treino-mudo', r2_onnx_key: 'models/x/m.onnx', is_active: true, module_code: 'epi' },
+        ] } }
+      }
+      if (path === '/v1/models/m-mudo') {
+        return { success: true, data: { model: { id: 'm-mudo' }, lineage: { dataset_version: { class_distribution: {} } } } }
+      }
+      if (path.startsWith('/cameras/model-config')) return { success: true, data: { deployments: {} } }
+      throw new Error(`GET inesperado: ${path}`)
+    })
+
+    render(<CameraModelScope classesCatalogo={[
+      { id: 1, name: 'Capacete', color: '#000' }, { id: 2, name: 'Luvas', color: '#111' },
+    ]} />)
+    const sel = await screen.findByLabelText('Modelo da câmera Canal 8') as HTMLSelectElement
+
+    const opt = Array.from(sel.options).find(o => o.value === 'm-mudo')!
+    expect(opt.textContent).toBe('treino-mudo')
+    expect(opt.textContent).not.toMatch(/classe/)
+    // O catálogo continua nomeando os chips (fallback de NOMES, decisão
+    // antiga) — o que ele não pode é virar "2 classes" no rótulo.
+    fireEvent.change(sel, { target: { value: 'm-mudo' } })
+    expect(screen.getByLabelText('Classe Capacete em Canal 8')).toBeDefined()
+  })
+
+  it('nome de câmera e data de deploy truncam com o texto inteiro no title (a última coluna parava cortada)', async () => {
+    render(<CameraModelScope classesCatalogo={[]} />)
+    await screen.findByLabelText('Modelo da câmera Canal 8')
+
+    expect(screen.getByText('Canal 8').getAttribute('title')).toBe('Canal 8')
+    const celulaData = screen.getByText(/^\d{2}\/\d{2}\/\d{2} \d{2}h\d{2}$/)
+    expect(celulaData.getAttribute('title')).toBe(new Date(DEPLOY.created_at).toLocaleString('pt-BR'))
+  })
+})
+
+describe('CameraModelScope — aviso curto que expande (o texto integral empurrava a tabela para fora da tela)', () => {
+  const TRECHO_INTEGRAL =
+    'protetor auditivo universal): é a CAPACIDADE do modelo ali, não a EXIGÊNCIA do cliente.'
+
+  it('fechado: a distinção capacidade × exigência aparece; o texto de 8 linhas, não', async () => {
+    render(<CameraModelScope classesCatalogo={[]} />)
+    await screen.findByLabelText('Modelo da câmera Canal 8')
+
+    expect(document.body.textContent).toContain('capacidade')
+    expect(document.body.textContent).toContain('exigência')
+    expect(document.body.textContent).not.toContain(TRECHO_INTEGRAL)
+  })
+
+  it('"Entenda": o texto original volta inteiro, palavra por palavra', async () => {
+    render(<CameraModelScope classesCatalogo={[]} />)
+    await screen.findByLabelText('Modelo da câmera Canal 8')
+
+    const entenda = screen.getByRole('button', { name: 'Entenda' })
+    expect(entenda.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(entenda)
+
+    expect(document.body.textContent).toContain(TRECHO_INTEGRAL)
+    expect(document.body.textContent).toContain(
+      'Será substituído pela matriz de exigência da RVB assim que ela ficar pronta',
+    )
+    expect(document.body.textContent).toContain(
+      'O equipamento instalado no site ainda NÃO aplica esse recorte por câmera — essa parte segue pendente.',
+    )
+    // Some de novo — é um aviso que se lê uma vez, não um bloco fixo.
+    fireEvent.click(screen.getByRole('button', { name: 'Ocultar' }))
+    expect(document.body.textContent).not.toContain(TRECHO_INTEGRAL)
   })
 })
 
