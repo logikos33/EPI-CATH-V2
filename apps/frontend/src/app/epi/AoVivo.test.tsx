@@ -149,12 +149,30 @@ describe('fluxo tokenizado de playback', () => {
     expect(cameraService.start).toHaveBeenCalledWith('cam-1')
   })
 
-  it('câmera arquivada não minta token nenhum', async () => {
+  it('câmera arquivada não entra na parede — nem como ladrilho morto, nem token', async () => {
+    // O defeito relatado pelo dono: a arquivada continuava na grade como um
+    // quadro "Câmera arquivada" que ele não tinha como tirar. "Ela fica pra
+    // sempre." Agora ela não chega à parede; o cabeçalho/estado vazio diz
+    // para onde foi, com link — sumir calado seria a outra mentira.
     respondeCameras([camera('cam-3', 'CAM-03 ARQUIVADA', false)])
     montar()
-    await screen.findByText('CAM-03 ARQUIVADA')
+    await screen.findByText('Nenhuma câmera ativa neste site')
+    expect(screen.queryByText('CAM-03 ARQUIVADA')).toBeNull()
+    expect(screen.queryByText('Câmera arquivada')).toBeNull()
     expect(cameraService.start).not.toHaveBeenCalled()
-    expect(screen.getByTitle('✕ OFFLINE')).toBeTruthy()
+    // Caminho de volta que leva a lugar DIFERENTE de onde se está.
+    expect(screen.getByRole('link', { name: 'Ir para Câmeras' }).getAttribute('href'))
+      .toBe(rotaNova('/epi/cameras'))
+  })
+
+  it('site com ativa e arquivada: só a ativa na grade, a arquivada contada no cabeçalho', async () => {
+    respondeCameras([camera('cam-1', 'CAM-01 DOCA NORTE'), camera('cam-9', 'CAM-09 ARQUIVADA', false)])
+    montar()
+    await screen.findByText('CAM-01 DOCA NORTE')
+    expect(screen.queryByText('CAM-09 ARQUIVADA')).toBeNull()
+    expect(screen.getByText('1 CÂMERAS')).toBeTruthy()
+    const linkInativas = screen.getByRole('link', { name: /1 INATIVAS, FORA DA PAREDE/ })
+    expect(linkInativas.getAttribute('href')).toBe(rotaNova('/epi/cameras'))
   })
 })
 
@@ -322,9 +340,13 @@ describe('estados da tela', () => {
   })
 
   it('o cabeçalho conta o que o backend afirma, não o que o player parece', async () => {
+    // Conta as que ESTÃO na parede; a inativa aparece à parte, não somada —
+    // "3 CÂMERAS" quando só 2 podem acender era o número errado no lugar mais
+    // visível da tela.
     respondeCameras([...CAMS, camera('cam-9', 'CAM-09 ARQUIVADA', false)])
     montar()
-    await screen.findByText('3 CÂMERAS · 2 ATIVAS')
+    await screen.findByText('2 CÂMERAS')
+    expect(screen.getByText(/1 INATIVAS, FORA DA PAREDE/)).toBeTruthy()
   })
 })
 
@@ -390,12 +412,12 @@ describe('agrupamento por site', () => {
     // Default = primeiro site na ordem em que aparece.
     expect(screen.getByText('CAM-02 PORTARIA')).toBeTruthy()
     expect(screen.queryByText('CAM-03 GALPAO')).toBeNull()
-    expect(screen.getByText('2 CÂMERAS · 2 ATIVAS')).toBeTruthy()
+    expect(screen.getByText('2 CÂMERAS')).toBeTruthy()
 
     fireEvent.change(screen.getByLabelText('Site'), { target: { value: 'site-b' } })
     await screen.findByText('CAM-03 GALPAO')
     expect(screen.queryByText('CAM-01 DOCA NORTE')).toBeNull()
-    expect(screen.getByText('1 CÂMERAS · 1 ATIVAS')).toBeTruthy()
+    expect(screen.getByText('1 CÂMERAS')).toBeTruthy()
   })
 })
 
@@ -501,6 +523,42 @@ describe('meus layouts', () => {
     }>
     // Ainda não salvou — a edição é só no estado até "Salvar layout atual".
     expect(salvo[0]?.nome).toBe('Parcial')
+  })
+
+  it('modo Montar: o X tira a câmera do quadro e NÃO exclui a câmera', async () => {
+    // As duas ações são diferentes e o dono pediu as duas. Esta é a de tirar
+    // do grid: a câmera volta no seletor do quadro vago e nenhuma rota de
+    // exclusão é chamada. Antes, "remover" só existia como opção escondida
+    // dentro do <select> rotulado "Trocar câmera desta posição".
+    montar()
+    await screen.findByText('CAM-01 DOCA NORTE')
+    fireEvent.click(screen.getByRole('button', { name: 'Montar' }))
+    await screen.findByTestId('grade-montagem')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Tirar CAM-01 DOCA NORTE do quadro 1' }))
+
+    // O ladrilho da câmera sai da parede (o nome ainda existe como <option>
+    // nos seletores — por isso a asserção é no ladrilho, não no texto solto).
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Abrir CAM-01 DOCA NORTE' })).toBeNull(),
+    )
+    // Quadro virou vago e a câmera está de volta no seletor — não sumiu do
+    // sistema, só desta parede.
+    const escolher = screen.getByRole('combobox', { name: 'Escolher câmera para o quadro 1' })
+    expect(within(escolher).getByRole('option', { name: 'CAM-01 DOCA NORTE' })).toBeTruthy()
+    expect(api.delete).not.toHaveBeenCalled()
+  })
+
+  it('modo Montar: o menu de trocar não oferece mais "remover" — isso é o X', async () => {
+    montar()
+    await screen.findByText('CAM-01 DOCA NORTE')
+    fireEvent.click(screen.getByRole('button', { name: 'Montar' }))
+    await screen.findByTestId('grade-montagem')
+
+    const trocar = screen.getByRole('combobox', { name: 'Trocar câmera do quadro 1' })
+    expect(within(trocar).queryByText('— remover —')).toBeNull()
+    // Todas as opções são câmeras: nenhuma opção de valor vazio sobrou.
+    expect(within(trocar).queryByRole('option', { name: '' })).toBeNull()
   })
 })
 

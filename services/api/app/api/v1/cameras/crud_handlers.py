@@ -224,11 +224,20 @@ def update_camera(camera_id: str):  # type: ignore[no-untyped-def]
 def delete_camera(camera_id: str):  # type: ignore[no-untyped-def]
     """---
     tags: [cameras]
-    summary: Deletar câmera
+    summary: Excluir câmera do sistema (irreversível pela UI)
+    description: |
+      Exclusão LÓGICA (`cameras.deleted_at`, migration 138). A câmera some da
+      lista, do Ao Vivo, do grid, dos seletores, do inventário e do config que
+      o edge baixa. O que NÃO some: alertas, evidências gravadas e frames de
+      treino já anotados — registro histórico, com possível valor legal.
+      O DELETE físico não é usado porque levaria alerta e evidência junto por
+      CASCADE e travaria por FK em qualquer câmera com frame de treino.
+      Não há rota de desfazer: quem quiser a câmera de volta cadastra de novo.
+      Para o reversível existe `POST /<id>/archive`.
     security: [{Bearer: []}]
     parameters:
       - {in: path, name: camera_id, type: string, required: true}
-    responses: {200: {description: Câmera deletada},
+    responses: {200: {description: Câmera excluída},
                 403: {description: Sem permissão}, 404: {description: Câmera não encontrada}}
     """
     try:

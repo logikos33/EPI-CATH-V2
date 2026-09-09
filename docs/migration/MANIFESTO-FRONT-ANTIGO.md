@@ -14,7 +14,7 @@ depois que a migração inteira estiver feita.
 | `SEM-DESENHO` | serve rota que o handoff não desenhou (Fase 0 §3.2) | ⛔ não — espera o design |
 | `INFRA` | não é tela (api, hooks, tipos, tema) | ⛔ caso a caso |
 
-## Situação — 396 arquivos, 67.504 linhas
+## Situação — 396 arquivos, 67.515 linhas
 
 | status | arquivos |
 |---|---:|
@@ -225,7 +225,7 @@ apagado não são a mesma coisa.
 | `src/hooks/useTrainingSocket.ts` | `INFRA` | — | 127 |
 | `src/main.tsx` | `INFRA` | — | 21 |
 | `src/services/api.ts` | `INFRA` | — | 269 |
-| `src/services/cameraService.ts` | `INFRA` | — | 269 |
+| `src/services/cameraService.ts` | `INFRA` | — | 280 |
 | `src/services/confidenceDisplay.ts` | `INFRA` | — | 59 |
 | `src/services/countingService.ts` | `INFRA` | — | 64 |
 | `src/services/crossTenantCameras.ts` | `INFRA` | — | 107 |

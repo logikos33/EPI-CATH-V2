@@ -49,8 +49,12 @@ cameras_bp.add_url_rule("", view_func=create_camera, methods=["POST"])
 cameras_bp.add_url_rule("/<camera_id>", view_func=get_camera, methods=["GET"])
 cameras_bp.add_url_rule("/<camera_id>", view_func=update_camera, methods=["PUT"])
 cameras_bp.add_url_rule("/<camera_id>", view_func=delete_camera, methods=["DELETE"])
-# Arquivar = tirar do reconhecimento sem apagar (o DELETE acima é destrutivo:
-# CASCADE em alerts/events/operations e trava por FK se já houver frame).
+# Duas ações DIFERENTES, de propósito:
+#   DELETE /<id>          exclui do sistema — some de todas as telas, do grid
+#                         e do config do edge, e não tem volta pela UI. É
+#                         exclusão LÓGICA (`cameras.deleted_at`, migration
+#                         138): alerta, evidência e frame de treino ficam.
+#   POST   /<id>/archive  tira do reconhecimento e VOLTA com /restore.
 cameras_bp.add_url_rule("/<camera_id>/archive", view_func=archive_camera, methods=["POST"])
 cameras_bp.add_url_rule("/<camera_id>/restore", view_func=restore_camera, methods=["POST"])
 

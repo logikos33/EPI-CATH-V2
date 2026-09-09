@@ -11,7 +11,20 @@ from app.infrastructure.database.repositories.camera_module_repository import (
 
 
 class CameraRepository(BaseRepository):
-    """Queries SQL para tabela cameras."""
+    """Queries SQL para tabela cameras.
+
+    ⚠️ TODA query de "quais câmeras existem" carrega `_VIVA` no WHERE
+    (migration 138). Sem ele, câmera EXCLUÍDA pelo dono reaparece — foi o
+    ponto único escolhido justamente para não depender de cada tela lembrar
+    de filtrar. Query de escrita pontual (probe, retention, schedule) não
+    precisa: quem chega nela já passou por um get_by_id/get_by_id_and_tenant
+    filtrado.
+    """
+
+    # Exclusão é LÓGICA (ver migration 138): apagar a linha levaria junto,
+    # por CASCADE, alerta e evidência — registro histórico com valor legal —
+    # e travaria por FK na primeira câmera que tem frame de treino.
+    _VIVA = "deleted_at IS NULL"
 
     _SELECT_COLS = (
         "id, tenant_id, name, location, description, manufacturer, "
@@ -55,7 +68,8 @@ class CameraRepository(BaseRepository):
     def get_by_id(self, camera_id: UUID) -> Optional[dict[str, Any]]:
         """Busca câmera por ID (inclui password_encrypted para stream)."""
         return self._execute_one(
-            "SELECT *, password_encrypted FROM public.cameras WHERE id = %s",
+            "SELECT *, password_encrypted FROM public.cameras "
+            f"WHERE id = %s AND {self._VIVA}",
             (str(camera_id),),
         )
 
@@ -63,7 +77,7 @@ class CameraRepository(BaseRepository):
         """Lista câmeras do tenant (sem password)."""
         return self._execute(
             f"SELECT {self._SELECT_COLS} FROM public.cameras "
-            "WHERE tenant_id = %s ORDER BY created_at DESC",
+            f"WHERE tenant_id = %s AND {self._VIVA} ORDER BY created_at DESC",
             (str(user_id),),
         )
 
@@ -71,7 +85,7 @@ class CameraRepository(BaseRepository):
         """Lista todas as câmeras (admin). Sem password."""
         return self._execute(
             f"SELECT {self._SELECT_COLS} FROM public.cameras "
-            "ORDER BY created_at DESC",
+            f"WHERE {self._VIVA} ORDER BY created_at DESC",
         )
 
     def update(
@@ -161,7 +175,7 @@ class CameraRepository(BaseRepository):
             "SELECT COALESCE(SUM(fps_target), 0) AS fps_demand_total, "
             "COUNT(*) AS cameras_active_count "
             "FROM public.cameras "
-            "WHERE site_id = %s AND tenant_id = %s AND is_active = true",
+            f"WHERE site_id = %s AND tenant_id = %s AND is_active = true AND {self._VIVA}",
             (str(site_id), str(tenant_id)),
         )
         return row or {"fps_demand_total": 0, "cameras_active_count": 0}
@@ -176,25 +190,35 @@ class CameraRepository(BaseRepository):
             "rtsp_substream_url, rtsp_url_override, "
             "fps_target, quality_preset, collection_subtype, is_active, module_code "
             "FROM public.cameras "
-            "WHERE site_id = %s AND tenant_id = %s "
+            f"WHERE site_id = %s AND tenant_id = %s AND {self._VIVA} "
             "ORDER BY created_at DESC",
             (str(site_id), str(tenant_id)),
         )
 
-    def delete(self, camera_id: UUID) -> int:
-        """Deleta câmera.
+    def soft_delete(self, camera_id: UUID) -> "dict[str, Any] | None":
+        """Exclui a câmera do sistema SEM apagar o histórico dela.
 
-        DESTRUTIVO: cameras é referenciada com ON DELETE CASCADE por alerts,
-        camera_events, counting_sessions, demo_videos e operations — apagar a
-        câmera apaga o histórico dela junto, em silêncio. training_frames e
-        model_deployments são NO ACTION, então a operação trava por FK assim
-        que a câmera tem qualquer frame de treino.
+        O DELETE físico não é uma opção e nunca foi: `cameras` é referenciada
+        com ON DELETE CASCADE por alerts, camera_events, counting_sessions,
+        demo_videos e operations — apagá-la levaria junto, em silêncio, os
+        alertas e as evidências gravadas, que são registro histórico e podem
+        ter valor legal. E training_frames/model_deployments são NO ACTION:
+        para qualquer câmera que já tenha frame de treino a operação nem
+        completa, trava por FK. Por isso a exclusão é lógica (migration 138).
 
-        Para tirar uma câmera do reconhecimento use set_active(False) via
-        CameraService.archive_camera — reversível e sem perda.
+        `is_active = false` vai JUNTO de propósito: as dezenas de queries que
+        já filtram por `is_active = true` (demanda de FPS, KPIs por módulo,
+        contagem do plano) passam a excluir a câmera sem nenhuma delas
+        precisar aprender o que é `deleted_at`.
+
+        `AND deleted_at IS NULL` no WHERE torna a operação idempotente e faz
+        o segundo DELETE devolver 404 em vez de "excluí de novo".
         """
-        return self._execute_mutation_no_return(
-            "DELETE FROM public.cameras WHERE id = %s",
+        return self._execute_mutation(
+            "UPDATE public.cameras "
+            "SET deleted_at = NOW(), is_active = false, updated_at = NOW() "
+            f"WHERE id = %s AND {self._VIVA} "
+            "RETURNING id, name",
             (str(camera_id),),
         )
 
@@ -222,7 +246,7 @@ class CameraRepository(BaseRepository):
         """
         row = self._execute_one(
             "SELECT COUNT(*) AS count FROM public.cameras "
-            f"WHERE tenant_id = %s AND is_active = true "
+            f"WHERE tenant_id = %s AND is_active = true AND {self._VIVA} "
             f"AND {escopo_camera_sql('public.cameras.id', 'public.cameras.module_code')}",
             tuple([tenant_id] + escopo_camera_params(tenant_id, module_code)),
         )
@@ -237,7 +261,7 @@ class CameraRepository(BaseRepository):
         is_active = status == "active"
         row = self._execute_one(
             "SELECT COUNT(*) AS count FROM public.cameras "
-            f"WHERE tenant_id = %s AND is_active = %s "
+            f"WHERE tenant_id = %s AND is_active = %s AND {self._VIVA} "
             f"AND {escopo_camera_sql('public.cameras.id', 'public.cameras.module_code')}",
             tuple(
                 [tenant_id, is_active]
@@ -249,7 +273,8 @@ class CameraRepository(BaseRepository):
     def count_active_all(self, tenant_id: str) -> int:
         """Conta todas as câmeras ativas do tenant (todos os módulos)."""
         row = self._execute_one(
-            "SELECT COUNT(*) AS count FROM public.cameras WHERE tenant_id = %s AND is_active = true",
+            "SELECT COUNT(*) AS count FROM public.cameras "
+            f"WHERE tenant_id = %s AND is_active = true AND {self._VIVA}",
             (tenant_id,),
         )
         return row["count"] if row else 0
@@ -257,7 +282,8 @@ class CameraRepository(BaseRepository):
     def count_all(self, tenant_id: str) -> int:
         """Conta todas as câmeras do tenant."""
         row = self._execute_one(
-            "SELECT COUNT(*) AS count FROM public.cameras WHERE tenant_id = %s",
+            f"SELECT COUNT(*) AS count FROM public.cameras "
+            f"WHERE tenant_id = %s AND {self._VIVA}",
             (tenant_id,),
         )
         return row["count"] if row else 0
@@ -270,7 +296,7 @@ class CameraRepository(BaseRepository):
         """
         return self._execute_one(
             f"SELECT {self._SELECT_COLS}, schedule_rules "
-            "FROM public.cameras WHERE id = %s AND tenant_id = %s",
+            f"FROM public.cameras WHERE id = %s AND tenant_id = %s AND {self._VIVA}",
             (str(camera_id), str(tenant_id)),
         )
 
@@ -368,7 +394,7 @@ class CameraRepository(BaseRepository):
         Filtra opcionalmente por tenant_id, site_id, brand e probe_status.
         Sem password — seguro retornar ao frontend.
         """
-        conditions = ["1=1"]
+        conditions = ["1=1", self._VIVA]
         params: list[Any] = []
         if tenant_id:
             conditions.append("tenant_id = %s")

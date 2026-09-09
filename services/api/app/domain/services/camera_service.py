@@ -518,7 +518,16 @@ class CameraService:
             pass  # Não bloquear resposta por falha no registro
 
     def delete_camera(self, camera_id: UUID, tenant_id: UUID, is_admin: bool = False) -> None:
-        """Deleta câmera. Valida posse por TENANT.
+        """Exclui a câmera do sistema. Valida posse por TENANT.
+
+        Exclusão LÓGICA (`cameras.deleted_at`, migration 138), não DELETE
+        físico — ver `CameraRepository.soft_delete` para o porquê. O efeito
+        para quem usa o produto é o pedido: a câmera some da lista, do Ao
+        Vivo, do grid, dos seletores e do config que o edge baixa. O que
+        NÃO some: alerta, evidência gravada e frame de treino já anotado.
+        Não há desfazer pela tela — quem quiser a câmera de volta cadastra
+        de novo (é por isso que `archive_camera` continua existindo, para
+        quem quer o reversível).
 
         O parâmetro sempre foi o tenant_id do contexto (ver o handler em
         cameras/crud_handlers.py), mas o nome antigo dizia `user_id` e a
@@ -536,7 +545,7 @@ class CameraService:
         if str(camera["tenant_id"]) != str(tenant_id) and not is_admin:
             raise NotFoundError("Câmera", str(camera_id))
 
-        self._camera_repo.delete(camera_id)
+        self._camera_repo.soft_delete(camera_id)
 
     def archive_camera(self, camera_id: UUID, tenant_id: UUID) -> dict:
         """Arquiva câmera (is_active=False) — reversível, nunca apaga linha.

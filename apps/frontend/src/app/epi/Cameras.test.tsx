@@ -28,6 +28,7 @@ import { Cameras, estadoDaCamera } from './Cameras'
 const listar = vi.fn()
 const testar = vi.fn()
 const arquivar = vi.fn()
+const excluir = vi.fn()
 const apiGet = vi.fn()
 const apiPost = vi.fn()
 const listarSites = vi.fn()
@@ -42,6 +43,7 @@ vi.mock('../../services/cameraService', () => ({
     list: (...a: unknown[]) => listar(...a),
     test: (...a: unknown[]) => testar(...a),
     archive: (...a: unknown[]) => arquivar(...a),
+    remove: (...a: unknown[]) => excluir(...a),
     restore: vi.fn(),
     start: vi.fn(),
     stop: vi.fn(),
@@ -189,8 +191,10 @@ beforeEach(() => {
   vi.clearAllMocks()
   permissoes.clear()
   isSuperAdmin = false
-  ;['cameras:read', 'cameras:write', 'cameras:test', 'cameras:control', 'cameras:configure']
+  ;['cameras:read', 'cameras:write', 'cameras:test', 'cameras:control', 'cameras:configure',
+    'cameras:delete']
     .forEach((p) => permissoes.add(p))
+  excluir.mockResolvedValue(undefined)
   listar.mockResolvedValue([CAM_01, CAM_04])
   listarSites.mockResolvedValue([SITE])
   saudeSites.mockResolvedValue([SAUDE])
@@ -571,5 +575,80 @@ describe('aba Desempenho (handoff-v2 Main.dc.html)', () => {
     expect((screen.getByRole('button', { name: '5 fps' }) as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByRole('button', { name: 'Salvar configuração' }) as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByText(/Somente leitura/)).toBeTruthy()
+  })
+})
+
+// ── Excluir câmera ───────────────────────────────────────────────────────────
+//
+// A tela que faltava: só havia "Arquivar", e a arquivada continuava aparecendo
+// no Ao Vivo para sempre. Excluir é DESTRUTIVO e sem desfazer pela UI — por
+// isso todo o contrato aqui é sobre o pedido de confirmação e sobre o que a
+// confirmação AFIRMA que acontece.
+
+describe('excluir câmera', () => {
+  it('o clique não exclui nada: abre a confirmação, que diz o que se perde e o que não', async () => {
+    montar()
+    await esperarCarregado()
+
+    fireEvent.click(screen.getByRole('button', { name: /Excluir/ }))
+
+    // Nada foi chamado só por abrir o diálogo.
+    expect(excluir).not.toHaveBeenCalled()
+    expect(screen.getByText('Excluir câmera')).toBeTruthy()
+
+    const aviso = screen.getByText(/sai do sistema/)
+    expect(aviso.textContent).toContain('CAM-01 Doca Norte')
+    // O que NÃO é apagado — a promessa que o backend cumpre com exclusão
+    // lógica (migration 138). Se um dia virar DELETE físico, esta frase é a
+    // que passa a mentir.
+    expect(aviso.textContent).toContain('evidências')
+    expect(aviso.textContent).toContain('Não dá para desfazer')
+  })
+
+  it('confirmando, chama a exclusão da câmera selecionada e recarrega a lista', async () => {
+    montar()
+    await esperarCarregado()
+    expect(listar).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: /Excluir/ }))
+    listar.mockResolvedValue([CAM_04])
+    fireEvent.click(screen.getByRole('button', { name: 'Excluir para sempre' }))
+
+    await waitFor(() => expect(excluir).toHaveBeenCalledWith('cam-01'))
+    // Recarrega: a excluída some da lista e a seleção cai na que restou —
+    // sem tela apontando para uma câmera que não existe mais.
+    await waitFor(() => expect(listar).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByText('CAM-01 Doca Norte')).toBeNull())
+  })
+
+  it('cancelar fecha o diálogo sem excluir', async () => {
+    montar()
+    await esperarCarregado()
+
+    fireEvent.click(screen.getByRole('button', { name: /Excluir/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+
+    await waitFor(() => expect(screen.queryByText('Excluir para sempre')).toBeNull())
+    expect(excluir).not.toHaveBeenCalled()
+  })
+
+  it('sem cameras:delete o botão não existe — item que leva a 403 é pior que item ausente', async () => {
+    permissoes.delete('cameras:delete')
+    montar()
+    await esperarCarregado()
+    expect(screen.queryByRole('button', { name: /Excluir/ })).toBeNull()
+    // Arquivar continua lá: são ações diferentes, com permissões diferentes.
+    expect(screen.getByRole('button', { name: 'Arquivar' })).toBeTruthy()
+  })
+
+  it('falha da API vira erro na tela, não exclusão silenciosa', async () => {
+    excluir.mockRejectedValue(new Error('Câmera não encontrada'))
+    montar()
+    await esperarCarregado()
+
+    fireEvent.click(screen.getByRole('button', { name: /Excluir/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Excluir para sempre' }))
+
+    expect(await screen.findByText('Câmera não encontrada')).toBeTruthy()
   })
 })

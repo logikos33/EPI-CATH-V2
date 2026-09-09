@@ -283,7 +283,7 @@ class TestDeleteCamera:
         repo.get_by_id.return_value = _cam(camera_id=camera_id, tenant_id=tenant_id)
 
         service.delete_camera(camera_id, tenant_id)
-        repo.delete.assert_called_once_with(camera_id)
+        repo.soft_delete.assert_called_once_with(camera_id)
 
     def test_delete_not_found_raises(self):
         service, repo = _make_service()
@@ -308,18 +308,35 @@ class TestDeleteCamera:
         camera_id = uuid4()
         repo.get_by_id.return_value = _cam(camera_id=camera_id, tenant_id=tenant_id)
         service.delete_camera(camera_id, tenant_id)
-        repo.delete.assert_called_once_with(camera_id)
+        repo.soft_delete.assert_called_once_with(camera_id)
 
-    def test_archive_nao_apaga_linha(self):
-        # Arquivar é o caminho para tirar câmera do reconhecimento: UPDATE
-        # reversível, jamais DELETE (que tem CASCADE em alerts/operations).
+    def test_archive_nao_exclui(self):
+        # Arquivar e excluir são ações DIFERENTES: arquivar é o UPDATE
+        # reversível de is_active; excluir marca `deleted_at` e tira a câmera
+        # de todas as telas para sempre. Confundir as duas é o defeito que
+        # esta tela veio consertar — arquivar não pode chamar soft_delete.
         service, repo = _make_service()
         tenant_id = uuid4()
         camera_id = uuid4()
         repo.get_by_id.return_value = _cam(camera_id=camera_id, tenant_id=tenant_id)
         service.archive_camera(camera_id, tenant_id)
         repo.set_active.assert_called_once_with(camera_id, is_active=False)
-        repo.delete.assert_not_called()
+        repo.soft_delete.assert_not_called()
+
+    def test_delete_nao_apaga_a_linha(self):
+        # A trava do requisito: excluir NUNCA pode virar DELETE físico — ele
+        # levaria alerta e evidência junto por CASCADE (registro histórico,
+        # possível valor legal) e travaria por FK em câmera com frame de
+        # treino. Só `soft_delete`.
+        service, repo = _make_service()
+        tenant_id = uuid4()
+        camera_id = uuid4()
+        repo.get_by_id.return_value = _cam(camera_id=camera_id, tenant_id=tenant_id)
+        service.delete_camera(camera_id, tenant_id)
+        repo.soft_delete.assert_called_once_with(camera_id)
+        # `delete` não existe mais no repositório. MagicMock aceita qualquer
+        # chamada calada, então a trava é olhar o que foi de fato chamado.
+        assert "delete" not in {c[0] for c in repo.method_calls}
 
     def test_archive_cross_tenant_404(self):
         service, repo = _make_service()
@@ -343,7 +360,7 @@ class TestDeleteCamera:
         camera_id = uuid4()
         repo.get_by_id.return_value = _cam(camera_id=camera_id, tenant_id=tenant_id)
         service.delete_camera(camera_id, uuid4(), is_admin=True)
-        repo.delete.assert_called_once_with(camera_id)
+        repo.soft_delete.assert_called_once_with(camera_id)
 
 
 # ---------------------------------------------------------------------------

@@ -126,7 +126,7 @@ class TestCameraService:
             "id": cam_id, "tenant_id": uid,
         }
         self.service.delete_camera(cam_id, uid)
-        self.camera_repo.delete.assert_called_once()
+        self.camera_repo.soft_delete.assert_called_once()
 
     def test_delete_camera_wrong_user(self) -> None:
         # Cross-tenant responde 404, nunca 403 (C-01 — não vazar existência).
@@ -147,7 +147,7 @@ class TestCameraService:
             "id": cam_id, "tenant_id": tenant_id,
         }
         self.service.delete_camera(cam_id, tenant_id)
-        self.camera_repo.delete.assert_called_once_with(cam_id)
+        self.camera_repo.soft_delete.assert_called_once_with(cam_id)
 
     def test_delete_camera_admin_override(self) -> None:
         cam_id = uuid4()
@@ -155,7 +155,7 @@ class TestCameraService:
             "id": cam_id, "tenant_id": uuid4(),
         }
         self.service.delete_camera(cam_id, uuid4(), is_admin=True)
-        self.camera_repo.delete.assert_called_once()
+        self.camera_repo.soft_delete.assert_called_once()
 
     def test_delete_camera_not_found(self) -> None:
         self.camera_repo.get_by_id.return_value = None
