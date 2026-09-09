@@ -67,18 +67,27 @@ Diretrizes:
 
 
 def _call_claude(camera_id: str, class_name: str, confidence: float, module_code: str) -> dict:
-    """Chama Claude claude-haiku-4-5-20251001 para análise de detecção."""
+    """Chama Claude claude-haiku-4-5-20251001 para análise de detecção.
+
+    ⚠️ `reason=None` em TODA falha de infraestrutura (chave ausente, resposta
+    impossível de parsear, exceção na chamada) — nunca o texto do erro.
+
+    `reason` é persistido em `alerts.verification_reason`, e essa coluna é
+    CONTEÚDO DE TELA: sai embaixo do selo de veredito em `/epi/eventos` e na
+    ficha da fila de verificação. Enquanto estas três linhas devolviam o erro
+    técnico, a tela do cliente imprimia "API key não configurada" em cima de
+    centenas de eventos reais — reportado pelo dono da RVB em 09/09/2026,
+    olhando a tela em operação. Erro de infraestrutura é assunto de LOG (o
+    `logger.warning`/`logger.error` logo acima já o registra, com o `exc`
+    inteiro), não de fila de operador.
+
+    Nada de informação se perde: `verification_status` continua gravando
+    'needs_human', que é exatamente o que aconteceu — a triagem não concluiu e
+    o caso vai para gente.
+    """
     if not _ANTHROPIC_KEY:
-        # ⛔ `reason` é CAMPO DE TELA: sai na Verificação como "Motivo da IA" e
-        # na lista de Eventos sob o selo de veredito. Falha de infraestrutura
-        # não é raciocínio da IA — escrever "API key não configurada" ali põe
-        # um problema nosso na cara do operador como se fosse análise.
-        # Medido em 09/09: 592 alertas com esse texto gravado.
-        # O veredito `needs_human` já diz tudo que o operador precisa saber
-        # (alguém tem de olhar); o PORQUÊ técnico vive no log, que é onde
-        # quem opera a plataforma procura.
         logger.warning("anthropic_key_missing: defaulting to needs_human")
-        return {"verdict": "needs_human", "reason": "", "adjusted_confidence": confidence}
+        return {"verdict": "needs_human", "reason": None, "adjusted_confidence": confidence}
 
     try:
         import anthropic  # noqa: PLC0415
@@ -105,20 +114,15 @@ def _call_claude(camera_id: str, class_name: str, confidence: float, module_code
         return result
 
     except json.JSONDecodeError as exc:
-        # Mesma regra do `_ANTHROPIC_KEY` acima: o operador vê `needs_human`,
-        # o motivo técnico fica no log.
         logger.error("claude_json_parse_error: %s", exc)
-        return {"verdict": "needs_human", "reason": "", "adjusted_confidence": confidence}
+        return {"verdict": "needs_human", "reason": None, "adjusted_confidence": confidence}
     except Exception as exc:
-        # ⛔ `f"Erro IA: {exc}"` ia direto para uma coluna que a tela mostra —
-        # mensagem de exceção pode carregar host, caminho ou trecho de payload.
-        # Erro nunca vira conteúdo de tela.
         logger.error("claude_call_error: %s", exc)
-        return {"verdict": "needs_human", "reason": "", "adjusted_confidence": confidence}
+        return {"verdict": "needs_human", "reason": None, "adjusted_confidence": confidence}
 
 
 def _update_alert_verification(
-    alert_id: str, verdict: str, reason: str, confidence: float, tenant_id: str,
+    alert_id: str, verdict: str, reason: str | None, confidence: float, tenant_id: str,
 ) -> None:
     """Atualiza verification_status/verdict da alerta no DB.
 
@@ -217,7 +221,7 @@ def verify_alert(
     except Exception as exc:
         logger.error("verify_alert_error: alert=%s err=%s", alert_id, exc)
         try:
-            _update_alert_verification(alert_id, "needs_human", f"Erro: {exc}", confidence, tenant_id)
+            _update_alert_verification(alert_id, "needs_human", None, confidence, tenant_id)
         except Exception:
             pass
         raise self.retry(exc=exc, countdown=30)
