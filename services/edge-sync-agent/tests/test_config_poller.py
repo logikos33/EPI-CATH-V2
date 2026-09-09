@@ -562,3 +562,90 @@ def test_cache_with_non_integer_collection_subtype_value_skips_only_that_entry(t
 
     assert cached is not None
     assert cached.collection_subtype_map == {"c1": 0}
+
+
+# ── eixo OPERAÇÃO: fps_target_map no MESMO cache ────────────────────────────
+#
+# O elo estava ROMPIDO: `fps_target` viajava no config/poll (a rota já o
+# seleciona em `list_for_site_config`) e morria ali — o cache não o persistia e
+# o gerador do DeepStream só conhecia um `interval` GLOBAL. Resultado prático:
+# o valor que o dono escolhe por câmera na tela não mudava nada no box.
+
+def test_writes_fps_target_map_alongside_channel_map(tmp_path):
+    cache_path = str(tmp_path / "config_cache.json")
+    http = MagicMock()
+    http.get.return_value = _http_resp(
+        200,
+        {
+            "cameras": [
+                {"id": "c1", "channel": 1, "is_active": True, "fps_target": 5},
+                {"id": "c2", "channel": 2, "is_active": True, "fps_target": 1},
+            ],
+            "config_version": "v1",
+        },
+        etag='"v1"',
+    )
+    p = _make_poller_with_cache(http, cache_path)
+
+    p._poll_once()
+
+    cached = read_channel_map(cache_path)
+    assert cached.channel_map == {"c1": 1, "c2": 2}
+    # Sem esta linha, "5 FPS nesta câmera" nunca sai da nuvem.
+    assert cached.fps_target_map == {"c1": 5, "c2": 1}
+
+
+def test_fps_target_map_excludes_inactive_or_channelless_cameras(tmp_path):
+    cache_path = str(tmp_path / "config_cache.json")
+    http = MagicMock()
+    http.get.return_value = _http_resp(
+        200,
+        {
+            "cameras": [
+                {"id": "c1", "channel": 1, "is_active": True, "fps_target": 5},
+                {"id": "c2", "channel": 2, "is_active": False, "fps_target": 5},
+                {"id": "c3", "is_active": True, "fps_target": 5},  # sem channel
+            ],
+        },
+        etag='"v1"',
+    )
+    p = _make_poller_with_cache(http, cache_path)
+
+    p._poll_once()
+
+    assert read_channel_map(cache_path).fps_target_map == {"c1": 5}
+
+
+def test_fps_target_ausente_nao_vira_default_no_cache(tmp_path):
+    """Ausência não vira 0 nem taxa cheia AQUI — quem lê decide.
+
+    Importa porque o gerador do DeepStream RECUSA gerar sem valor, em vez de
+    assumir taxa cheia: 17 fontes a 30 fps saturam a GPU do Orin e ninguém
+    descobre isso olhando o config.
+    """
+    cache_path = str(tmp_path / "config_cache.json")
+    http = MagicMock()
+    http.get.return_value = _http_resp(
+        200,
+        {"cameras": [{"id": "c1", "channel": 1, "is_active": True}]},
+        etag='"v1"',
+    )
+    p = _make_poller_with_cache(http, cache_path)
+
+    p._poll_once()
+
+    cached = read_channel_map(cache_path)
+    assert cached.channel_map == {"c1": 1}
+    assert cached.fps_target_map == {}
+
+
+def test_cache_antigo_sem_fps_target_map_continua_valido(tmp_path):
+    """Cache gravado antes desta mudança não pode virar 'config indisponível'."""
+    from app.edge_config_cache import read_channel_map as ler
+    p = tmp_path / "antigo.json"
+    p.write_text('{"channel_map": {"c1": 3}, "config_version": "v9"}', encoding="utf-8")
+
+    cached = ler(str(p))
+
+    assert cached is not None and cached.channel_map == {"c1": 3}
+    assert cached.fps_target_map == {}
