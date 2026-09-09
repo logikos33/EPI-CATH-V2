@@ -198,3 +198,27 @@ export const viewAllBtn = style({
     background: vars.color.bgHover,
   },
 })
+
+/** "Marcar todas como lidas" — uma requisição para as 235, não 235. */
+export const marcarTodasBtn = style({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: '6px',
+  width: '100%',
+  padding: `6px ${vars.space.md}`,
+  border: 'none',
+  borderBottom: `1px solid ${vars.color.borderSubtle}`,
+  background: 'transparent',
+  font: 'inherit',
+  fontSize: '12px',
+  fontWeight: 600,
+  color: vars.color.primary,
+  cursor: 'pointer',
+  flexShrink: 0,
+  ':hover': { background: vars.color.bgHover },
+  ':disabled': { opacity: 0.5, cursor: 'progress' },
+})
+
+/** Rodapé: as saídas do painel ficam juntas e nunca rolam com a lista. */
+export const rodape = style({ flexShrink: 0 })

@@ -173,7 +173,12 @@ export function Shell({ carregando }: ShellProps) {
           * (`navPorPerfil.ts`). Sino sem ela seria um badge que só sabe pedir
           * 403 e um clique que leva a uma tela que o perfil não abre.
           */}
-        {can('alerts:read') && <NotificationBell rotaAlertas={rotaNova('/epi/eventos')} />}
+        {can('alerts:read') && (
+          <NotificationBell
+            rotaAlertas={rotaNova('/epi/eventos')}
+            rotaCentral={rotaNova('/notificacoes')}
+          />
+        )}
         <button
           className={s.botaoIcone}
           onClick={() => setPaletaAberta(true)}

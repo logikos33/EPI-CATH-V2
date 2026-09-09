@@ -54,6 +54,7 @@ O MODELO É PARÂMETRO: troque `--mapa-taxonomia` quando o duelo terminar.
 """
 from __future__ import annotations
 
+from collections import Counter
 import argparse
 import json
 import logging
@@ -166,7 +167,49 @@ class Publicador:
         self._cooldown_s = cooldown_s
         self._confianca_min = confianca_min
         self._mux_wh = list(mux_wh)
-        self._ultimo_por_camera: dict[str, float] = {}
+        # Janela de cena por câmera: (instante em que a janela abriu, MÁXIMO já
+        # publicado por classe dentro dela). Ver `_deve_publicar`.
+        self._janela: dict[str, tuple[float, Counter]] = {}
+        # Cooldown específico da câmera (o front governa); cai no global quando
+        # a câmera não tem valor próprio.
+        self._cooldown_por_camera: dict[str, float] = {}
+        self.contagem: Counter = Counter()
+
+    def cooldown_de(self, camera_id: str) -> float:
+        """Cooldown desta câmera. O front governa quantos alertas ela gera."""
+        return self._cooldown_por_camera.get(camera_id, self._cooldown_s)
+
+    def _deve_publicar(self, camera_id: str, deteccoes: list[dict], instante: float) -> bool:
+        """Cena estável não republica; cena que CRESCE republica na hora.
+
+        O pedido do dono: "a pessoa vai entrar vai ficar no quadro por um bom
+        tempo e se foi gerado um reconhecimento com aquele cenário ela só
+        precisa validar depois de um tempo novamente se aquele cenário não
+        alterou, óbvio que se entrou mais pessoas na cena ela vai precisar
+        funcionar".
+
+        Por que MÁXIMO por classe, e não "a assinatura mudou": o recall
+        agregado do detector servido é 0,57 (ADR-0067). Com dois tipos de
+        violação em cena, a sequência real é
+        `{sem luvas} → {sem luvas, sem óculos} → {sem luvas}` por **falha de
+        detecção**, não por mudança de cena. Comparar com a última assinatura
+        faz cada oscilação virar evento — o dedup ficaria PIOR que o cooldown
+        cego. Guardando o máximo já publicado na janela, encolher nunca
+        publica e crescer publica na hora, que é exatamente a assimetria
+        pedida: mais gente é notícia, menos gente não é.
+        """
+        contagem = Counter(str(d.get("class", "")) for d in deteccoes)
+        abertura, maximo = self._janela.get(camera_id, (0.0, Counter()))
+        if instante - abertura >= self.cooldown_de(camera_id):
+            self._janela[camera_id] = (instante, contagem)   # janela nova
+            return True
+        if any(n > maximo.get(c, 0) for c, n in contagem.items()):
+            # Monotônico: o máximo nunca encolhe dentro da janela.
+            self._janela[camera_id] = (abertura, Counter(
+                {c: max(n, maximo.get(c, 0)) for c in set(maximo) | set(contagem)
+                 for n in [contagem.get(c, 0)]}))
+            return True
+        return False
 
     def tem_violacao(self, deteccoes: list[dict]) -> bool:
         if not deteccoes:
@@ -187,32 +230,56 @@ class Publicador:
     def processar_arquivo(self, caminho: Path) -> dict | None:
         """Um arquivo do dump → payload a publicar, ou None (nada a dizer).
 
-        SEMPRE apaga o arquivo: o dump é buffer, não acervo. Deixar crescer é
-        o intertravamento por disco cheio que o CLAUDE.md descreve.
+        A ORDEM MUDOU e é o conserto principal: antes o cooldown era checado
+        **antes** de ler o arquivo, então "entrou mais gente na cena" não
+        disparava nada — a câmera ficava muda pela janela inteira, por mais que
+        a cena mudasse. Agora lê, traduz e só então decide.
+
+        SOBRE APAGAR: o dump é buffer, não acervo, e deixá-lo crescer é o
+        intertravamento por disco cheio. Então continua apagando sempre — mas
+        o que antes sumia em silêncio agora é CONTADO e o nome anômalo vai
+        para o log. A evidência que faltava para diagnosticar divergência
+        entre config e mapa era o contador e o nome, não o arquivo.
         """
-        m = _NOME_KITTI.match(caminho.name)
+        anomalia = None
         try:
+            m = _NOME_KITTI.match(caminho.name)
             if not m:
+                self.contagem["nome_invalido"] += 1
+                anomalia = f"nome fora do padrão: {caminho.name}"
                 return None
             camera_id = self._fontes.get(str(int(m.group(1))))
             if camera_id is None:
-                return None  # fonte que não está no mapa: config e mapa divergiram
+                # config do DeepStream e mapa de fontes divergiram: a fonte
+                # existe no pipeline e não existe no mapa.
+                self.contagem["fonte_desconhecida"] += 1
+                anomalia = f"fonte {m.group(1)} não está no mapa de fontes"
+                return None
             instante = caminho.stat().st_mtime
-            anterior = self._ultimo_por_camera.get(camera_id, 0.0)
-            if instante - anterior < self._cooldown_s:
-                return None
-            deteccoes = [
-                d for d in parse_kitti(caminho.read_text(encoding="utf-8", errors="replace"))
-                if d["confidence"] >= self._confianca_min
-            ]
+            self.contagem["lidas"] += 1
+
+            brutas = parse_kitti(caminho.read_text(encoding="utf-8", errors="replace"))
+            self.contagem["deteccoes_brutas"] += len(brutas)
+            deteccoes = [d for d in brutas if d["confidence"] >= self._confianca_min]
+            self.contagem["barradas_confianca"] += len(brutas) - len(deteccoes)
             deteccoes = self._taxonomia.traduzir(deteccoes)
+            for d in deteccoes:
+                self.contagem[f"classe:{d.get('class')}"] += 1
+
             if not self.tem_violacao(deteccoes):
+                self.contagem["barradas_polaridade"] += 1
                 return None
-            self._ultimo_por_camera[camera_id] = instante
+            if not self._deve_publicar(camera_id, deteccoes, instante):
+                self.contagem["barradas_cooldown"] += 1
+                return None
+            self.contagem["publicadas"] += 1
             return self.montar(camera_id, deteccoes, instante)
         except OSError:
+            self.contagem["erro_io"] += 1
             return None
         finally:
+            if anomalia:
+                logger.warning("dump_anomalo %s", anomalia)
             try:
                 caminho.unlink()
             except OSError:
@@ -279,6 +346,40 @@ def autoteste() -> int:
     assert payload["detections"][0]["frame_wh"] == [1280, 720]
     assert payload["detections"][0]["bbox_unidade"] == _UNIDADE_BBOX
 
+    # ---- dedup de cena: o que o dono pediu, e o que quebraria um dedup ingênuo ----
+    d = lambda *cs: [{"class": c} for c in cs]
+    pub2 = Publicador({"0": "cam"}, tax, {"sem protetor de ouvido"}, 30.0, 0.0, (1280, 720))
+
+    # 1) Cena PARADA não republica. Pessoa 10 min no quadro = 1 evento, não 20.
+    assert pub2._deve_publicar("cam", d("a"), 1000.0) is True
+    for t in range(1001, 1030):
+        assert pub2._deve_publicar("cam", d("a"), float(t)) is False, t
+
+    # 2) Cena que CRESCE republica na hora — "entrou mais gente".
+    assert pub2._deve_publicar("cam", d("a", "a"), 1005.0) is True
+
+    # 3) ENCOLHER nunca republica: some uma pessoa, não é notícia.
+    assert pub2._deve_publicar("cam", d("a"), 1006.0) is False
+
+    # 4) O caso que mata dedup por "assinatura mudou": com recall 0,57 a
+    #    sequência {SL} → {SL,SO} → {SL} acontece por FALHA DE DETECÇÃO. O
+    #    primeiro crescimento é notícia; a volta ao estado menor, não. Um dedup
+    #    que compara com a última assinatura publicaria nas duas.
+    pub3 = Publicador({"0": "cam"}, tax, None, 30.0, 0.0, (1280, 720))
+    assert pub3._deve_publicar("c", d("SL"), 2000.0) is True
+    assert pub3._deve_publicar("c", d("SL", "SO"), 2001.0) is True   # cresceu: notícia
+    assert pub3._deve_publicar("c", d("SL"), 2002.0) is False        # oscilou: não
+    assert pub3._deve_publicar("c", d("SL", "SO"), 2003.0) is False  # já foi contada
+
+    # 5) Passado o cooldown, janela nova: volta a publicar mesmo igual.
+    assert pub3._deve_publicar("c", d("SL"), 2000.0 + 31) is True
+
+    # 6) Cooldown por câmera — é como o front governa quantos alertas cada
+    #    câmera gera. Sem valor próprio, cai no global.
+    pub3._cooldown_por_camera["c"] = 5.0
+    assert pub3.cooldown_de("c") == 5.0
+    assert pub3.cooldown_de("outra") == 30.0
+
     print("autoteste OK")
     return 0
 
@@ -302,6 +403,12 @@ def main() -> int:
     p.add_argument("--confianca-min", type=float, default=0.5)
     p.add_argument("--cooldown-s", type=float, default=30.0,
                    help="mínimo entre dois eventos da MESMA câmera (default 30s)")
+    p.add_argument("--cooldowns", default="~/.config/recognition/cooldown_por_camera.json",
+                   help="JSON {camera_id: segundos} — é por aqui que o FRONT governa quantos "
+                        "alertas cada câmera gera. Relido por mtime, sem reiniciar o processo. "
+                        "Ausente = todas usam --cooldown-s")
+    p.add_argument("--resumo-s", type=float, default=300.0,
+                   help="cadência do log de censo (contadores). 0 desliga")
     p.add_argument("--intervalo-s", type=float, default=2.0, help="cadência da varredura")
     p.add_argument("--idade-minima-s", type=float, default=1.0,
                    help="só lê dump com mtime mais velho que isto (evita leitura parcial)")
@@ -366,8 +473,34 @@ def main() -> int:
         taxonomia.modelo_id or "(nenhuma)", args.seco,
     )
 
+    cooldowns_path = Path(os.path.expanduser(args.cooldowns))
+    mtime_cooldowns = 0.0
+
+    def recarregar_cooldowns() -> None:
+        """Relê o mapa quando o arquivo muda — mudar na tela muda a cadência
+        SEM reiniciar o processo (reiniciar o DeepStream reconecta 17 fontes
+        RTSP contra um gravador com anti-brute-force; aqui não custa nada)."""
+        nonlocal mtime_cooldowns
+        try:
+            m = cooldowns_path.stat().st_mtime
+        except OSError:
+            return
+        if m == mtime_cooldowns:
+            return
+        try:
+            dados = json.loads(cooldowns_path.read_text(encoding="utf-8"))
+            pub._cooldown_por_camera = {str(k): float(v) for k, v in dados.items()}
+            mtime_cooldowns = m
+            logger.info("cooldowns_recarregados n=%d", len(pub._cooldown_por_camera))
+        except (OSError, ValueError, TypeError) as e:
+            # Arquivo pela metade (escrita concorrente) ou valor inválido: fica
+            # com o anterior. Nunca derruba o publicador por causa de config.
+            logger.warning("cooldowns_invalidos %s: %s", cooldowns_path, e)
+
     publicados = 0
+    proximo_resumo = time.time() + args.resumo_s
     while True:
+        recarregar_cooldowns()
         for payload in pub.tick(kitti_dir, args.idade_minima_s):
             canal = f"det:{payload['camera_id']}"
             if cliente is not None:
@@ -378,6 +511,14 @@ def main() -> int:
                 canal, [d["class"] for d in payload["detections"]],
                 len(payload["detections"]), publicados,
             )
+        if args.resumo_s and time.time() >= proximo_resumo:
+            # CENSO, não amostra dos sobreviventes. Sem isto não dá para
+            # distinguir "o modelo está mudo" de "o modelo fala e o filtro
+            # barra tudo" — que foi exatamente a dúvida de 09/09, quando 4.829
+            # detecções noturnas não chegaram à nuvem e ninguém sabia por quê.
+            logger.info("publicador_resumo %s", dict(sorted(pub.contagem.items())))
+            pub.contagem.clear()
+            proximo_resumo = time.time() + args.resumo_s
         time.sleep(args.intervalo_s)
 
 

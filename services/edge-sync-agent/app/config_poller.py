@@ -217,8 +217,18 @@ class ConfigPoller:
             for cam in active_with_channel
             if cam.get("collection_subtype") is not None
         }
+        # Eixo OPERAÇÃO: fps_target por câmera. Mesmo filtro ativa+com-canal.
+        # Ausente no payload NÃO vira default aqui — quem lê decide, e o
+        # gerador do DeepStream RECUSA gerar sem valor em vez de assumir taxa
+        # cheia, que satura a GPU em silêncio.
+        fps_target_map = {
+            str(cam["id"]): int(cam["fps_target"])
+            for cam in active_with_channel
+            if cam.get("fps_target") is not None
+        }
         edge_config_cache.write_channel_map(
-            self._cache_path, channel_map, config_version, collection_subtype_map
+            self._cache_path, channel_map, config_version, collection_subtype_map,
+            fps_target_map,
         )
 
     # ── main loop ────────────────────────────────────────────────────────────
