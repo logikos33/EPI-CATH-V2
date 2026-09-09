@@ -171,9 +171,9 @@ import { agruparPorRajada } from '../../utils/rajadas'
 import { LogikosLoader } from '../shell/LogikosLoader'
 import * as s from './Verificacao.css'
 import { rotaNova } from '../RotasNovas'
+import { estiloDaCaixa, referenciaDaCaixa } from '../../services/bboxProjecao'
 
 /** Única unidade de bbox projetável (contrato de `domain/detectors/base.py`). */
-const BBOX_PIXELS = 'pixels_xywh_frame_original'
 
 type Veredito = 'approve' | 'reject'
 
@@ -940,9 +940,13 @@ export function Verificacao() {
   const rotuloClasse = labelForClass(classe)
   const vereditoAtual = decididos[atual.id]
   const violacoesTodas = atual.violations ?? []
-  const desenhaveis = violacoesTodas.filter((v) => v.bbox && v.bbox_unidade === BBOX_PIXELS)
-  const semUnidade = violacoesTodas.filter((v) => v.bbox && v.bbox_unidade !== BBOX_PIXELS).length
-  const indexPrincipal = violacoesTodas.findIndex((v) => v.bbox && v.bbox_unidade === BBOX_PIXELS)
+  // Projetável = sabemos contra QUE quadro a caixa foi medida. Comparar com
+  // uma unidade só deixava a tela cega para tudo que vem do edge.
+  const projetavel = (v: { bbox?: Bbox; bbox_unidade?: string; frame_wh?: number[] }) =>
+    referenciaDaCaixa(v, { w: 1, h: 1 }) !== null
+  const desenhaveis = violacoesTodas.filter(projetavel)
+  const semUnidade = violacoesTodas.filter((v) => v.bbox && !projetavel(v)).length
+  const indexPrincipal = violacoesTodas.findIndex(projetavel)
   const principal = desenhaveis[0]?.bbox
   const confianca = atual.confidence ?? atual.violations?.[0]?.confidence
   /** Origem DECLARADA das caixas (issue #670) — regra compartilhada,
@@ -1023,7 +1027,10 @@ export function Verificacao() {
                       key={i}
                       data-testid="caixa-violacao"
                       className={s.caixa}
-                      style={caixaEmPorcento(v.bbox as Bbox, natural.w, natural.h)}
+                      // Quadro CERTO: a caixa do edge é medida no streammux,
+                      // não na imagem exibida. Correção e rascunho, abaixo,
+                      // nascem na imagem e seguem com `natural`.
+                      style={estiloDaCaixa(v, natural) ?? undefined}
                     >
                       <span className={s.caixaRotulo}>
                         {labelForClass(v.class).toUpperCase()}

@@ -60,10 +60,10 @@ import {
   MOTIVOS_VERIFICACAO, labelForVerificationReason, type MotivoVerificacao,
 } from '../../utils/labels'
 import { rotaNova } from '../RotasNovas'
-import { BBOX_PIXELS, caixaEmPorcento } from './EventoDetalhe'
 import * as e from './EventoDetalhe.css'
 import * as s from './Eventos.css'
 import { useLupa } from './useLupa'
+import { estiloDaCaixa, referenciaDaCaixa } from '../../services/bboxProjecao'
 
 const MODULO = 'epi'
 
@@ -201,8 +201,11 @@ export function PainelEvidencia({
   )
 
   const url = evidencia?.evidence_url ?? null
+  // Projetável = a tela sabe contra QUE quadro a caixa foi medida. A do edge
+  // é medida no streammux (1280×720) e a imagem vem do RTSP (1920×1080);
+  // dividir pelo tamanho da imagem punha a caixa a 2/3 do lugar certo.
   const desenhaveis = (evidencia?.violations ?? []).filter(
-    (v) => v.bbox && v.bbox_unidade === BBOX_PIXELS,
+    (v) => referenciaDaCaixa(v, { w: 1, h: 1 }) !== null,
   )
 
   return (
@@ -276,7 +279,7 @@ export function PainelEvidencia({
                       data-testid="caixa-violacao"
                       className={e.caixa}
                       style={{
-                        ...caixaEmPorcento(v.bbox as Bbox, natural.w, natural.h),
+                        ...(estiloDaCaixa(v, natural) ?? {}),
                         // contra-escala: a 8× uma borda de 2,5px come a evidência
                         borderWidth: `${2.5 / lupa.escala}px`,
                         borderRadius: `${4 / lupa.escala}px`,
