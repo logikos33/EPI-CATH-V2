@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 
+import { getToken } from '../../../services/api'
+
 export type AdminEvent =
   | { type: 'worker_status'; tenant_schema: string; status: string }
   | { type: 'training_approval'; id: string; status: string }
@@ -19,7 +21,7 @@ export function useAdminWebSocket({ enabled = true, onEvent }: UseAdminWebSocket
   useEffect(() => {
     if (!enabled) return
 
-    const token = localStorage.getItem('token') ?? ''
+    const token = getToken() ?? ''
     const socket = io('/admin', {
       auth: { token },
       transports: ['websocket'],

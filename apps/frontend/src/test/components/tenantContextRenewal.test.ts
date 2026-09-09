@@ -17,7 +17,7 @@ vi.mock('../../services/api', async () => {
   return { ...actual, api: { ...actual.api, post: vi.fn() } }
 })
 
-// localStorage real é pouco confiável neste ambiente de teste (mesmo motivo
+// sessionStorage real é pouco confiável neste ambiente de teste (mesmo motivo
 // documentado em tenantContextExpiry.test.ts) — substituído por um Storage
 // in-memory via vi.stubGlobal.
 class MemoryStorage implements Storage {
@@ -35,7 +35,7 @@ class MemoryStorage implements Storage {
 const RENEW_DELAY_MS = (30 - 5) * 60_000
 
 function activateContext(tenantId = 'tenant-rvb'): void {
-  localStorage.setItem(
+  sessionStorage.setItem(
     TENANT_CONTEXT_META_KEY,
     JSON.stringify({
       tenant_id: tenantId,
@@ -60,7 +60,7 @@ function renewResponse(token: string) {
 
 describe('scheduleTenantContextRenewal', () => {
   beforeEach(() => {
-    vi.stubGlobal('localStorage', new MemoryStorage())
+    vi.stubGlobal('sessionStorage', new MemoryStorage())
     vi.stubGlobal('sessionStorage', new MemoryStorage())
     vi.mocked(api.post).mockReset()
     vi.useFakeTimers()
@@ -92,7 +92,7 @@ describe('scheduleTenantContextRenewal', () => {
     await vi.advanceTimersByTimeAsync(RENEW_DELAY_MS)
 
     expect(api.post).toHaveBeenCalledWith('/v1/admin/tenant-context/renew', {})
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('renewed-token-1')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('renewed-token-1')
   })
 
   it('sucesso reagenda a próxima renovação — sessão longa continua renovando', async () => {
@@ -105,11 +105,11 @@ describe('scheduleTenantContextRenewal', () => {
 
     await vi.advanceTimersByTimeAsync(RENEW_DELAY_MS)
     expect(api.post).toHaveBeenCalledTimes(1)
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('renewed-token-1')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('renewed-token-1')
 
     await vi.advanceTimersByTimeAsync(RENEW_DELAY_MS)
     expect(api.post).toHaveBeenCalledTimes(2)
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('renewed-token-2')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('renewed-token-2')
   })
 
   // JWT mínimo só com o claim exp — getSessionTokenExpMs lê o payload do
@@ -126,7 +126,7 @@ describe('scheduleTenantContextRenewal', () => {
     // contexto vencia silenciosamente aos 30min e a PRÓXIMA chamada
     // autenticada (renovação de playback, 55min) levava 401 ×8 → /login.
     activateContext()
-    localStorage.setItem(TOKEN_KEY, makeJwt(Math.floor((Date.now() + 30 * 60_000) / 1000)))
+    sessionStorage.setItem(TOKEN_KEY, makeJwt(Math.floor((Date.now() + 30 * 60_000) / 1000)))
     vi.mocked(api.post)
       .mockRejectedValueOnce(new Error('API reiniciando (deploy)'))
       .mockResolvedValueOnce(renewResponse('renewed-token-1'))
@@ -140,12 +140,12 @@ describe('scheduleTenantContextRenewal', () => {
     // Retry vem em ~30s — com o token ainda vivo — e desta vez renova.
     await vi.advanceTimersByTimeAsync(31_000)
     expect(api.post).toHaveBeenCalledTimes(2)
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('renewed-token-1')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('renewed-token-1')
   })
 
   it('falha com token JÁ vencido: desiste — o branch 401 de api.ts restaura o superadmin', async () => {
     activateContext()
-    localStorage.setItem(TOKEN_KEY, makeJwt(Math.floor((Date.now() - 60_000) / 1000)))
+    sessionStorage.setItem(TOKEN_KEY, makeJwt(Math.floor((Date.now() - 60_000) / 1000)))
     vi.mocked(api.post).mockRejectedValue(new Error('401'))
 
     scheduleTenantContextRenewal()
@@ -161,7 +161,7 @@ describe('scheduleTenantContextRenewal', () => {
     activateContext()
     // Token com só 10min de vida (renew anterior atrasado, relógio, etc.):
     // renovação deve vir em ~5min (exp - margem), não em 25min.
-    localStorage.setItem(TOKEN_KEY, makeJwt(Math.floor((Date.now() + 10 * 60_000) / 1000)))
+    sessionStorage.setItem(TOKEN_KEY, makeJwt(Math.floor((Date.now() + 10 * 60_000) / 1000)))
     vi.mocked(api.post).mockResolvedValue(renewResponse('renewed-token-1'))
 
     scheduleTenantContextRenewal()
@@ -181,13 +181,13 @@ describe('scheduleTenantContextRenewal', () => {
     // Timer pendente no fallback de 25min (token sem exp legível ainda);
     // enquanto isso o token corrente "ficou" a 3min do vencimento (timer
     // estrangulado por aba oculta/sleep é o cenário real).
-    localStorage.setItem(TOKEN_KEY, makeJwt(Math.floor((Date.now() + 3 * 60_000) / 1000)))
+    sessionStorage.setItem(TOKEN_KEY, makeJwt(Math.floor((Date.now() + 3 * 60_000) / 1000)))
 
     document.dispatchEvent(new Event('visibilitychange'))
     await vi.advanceTimersByTimeAsync(100)
 
     expect(api.post).toHaveBeenCalledTimes(1)
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('renewed-token-1')
+    expect(sessionStorage.getItem(TOKEN_KEY)).toBe('renewed-token-1')
   })
 
   it('cancelTenantContextRenewal impede a renovação agendada de disparar', async () => {

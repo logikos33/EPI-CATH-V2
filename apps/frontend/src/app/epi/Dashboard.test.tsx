@@ -193,7 +193,7 @@ const STATS_RVB = {
 function montar({
   permissoes = ['alerts:read', 'cameras:read'],
 }: { permissoes?: string[] } = {}) {
-  localStorage.setItem(
+  sessionStorage.setItem(
     'user',
     JSON.stringify({ id: 'u1', email: 'a@b.c', name: 'Ana', role: 'operator', permissions: permissoes }),
   )
@@ -252,6 +252,9 @@ beforeEach(() => {
   // react-query e o `waitFor` do Testing Library funcionando.
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(AGORA)
+  // Dois armazenamentos, de propósito: a SESSÃO ('user') vive na aba
+  // (services/sessao.ts) e a PREFERÊNCIA de widget vive no navegador.
+  vi.stubGlobal('sessionStorage', new MemoriaStorage())
   vi.stubGlobal('localStorage', new MemoriaStorage())
   getStats.mockResolvedValue({ ...STATS_RVB })
   getTimeline.mockResolvedValue({ bucket: 'hour', timeline: [] })

@@ -24,9 +24,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Entrar } from './Entrar'
 import { useToastStore } from '../../components/ui/Toast/useToast'
 
-/** jsdom desta config expõe `localStorage` OCO — ver App.test.tsx. */
+/** jsdom desta config expõe `sessionStorage` OCO — ver App.test.tsx. */
 const armazenado = new Map<string, string>()
-Object.defineProperty(globalThis, 'localStorage', {
+Object.defineProperty(globalThis, 'sessionStorage', {
   configurable: true,
   value: {
     getItem: (k: string) => armazenado.get(k) ?? null,
@@ -131,7 +131,7 @@ describe('senha temporária — a travessia inteira, sem mockar o caminho', () =
     await trocarPara('minha-senha-nova')
 
     // 2. Terminou DENTRO do produto: token guardado e navegação disparada.
-    await waitFor(() => expect(localStorage.getItem('token')).toBe('jwt-de-verdade'))
+    await waitFor(() => expect(sessionStorage.getItem('token')).toBe('jwt-de-verdade'))
     expect(local.href).toBe('/novo/')
 
     // 3. A ordem real das três chamadas — a do meio é a que faltava no produto.
@@ -155,8 +155,8 @@ describe('senha temporária — a travessia inteira, sem mockar o caminho', () =
     // A porta do produto é o token. Com a troca pendente ele não existe, e
     // por isso não há URL a digitar: sem token o App inteiro é a tela de
     // login (o `path="*"` deslogado de App.tsx).
-    expect(localStorage.getItem('token')).toBeNull()
-    expect(localStorage.getItem('user')).toBeNull()
+    expect(sessionStorage.getItem('token')).toBeNull()
+    expect(sessionStorage.getItem('user')).toBeNull()
     expect(local.href).toBe('/novo/entrar')
   })
 
@@ -168,7 +168,7 @@ describe('senha temporária — a travessia inteira, sem mockar o caminho', () =
     await trocarPara('123')
 
     expect(await screen.findByText('Senha: mínimo 6 caracteres')).toBeTruthy()
-    expect(localStorage.getItem('token')).toBeNull()
+    expect(sessionStorage.getItem('token')).toBeNull()
     expect(local.href).toBe('/novo/entrar')
   })
 
@@ -207,6 +207,6 @@ describe('senha temporária — a travessia inteira, sem mockar o caminho', () =
     entrarCom('chutei')
     expect(await screen.findByText('Credenciais inválidas')).toBeTruthy()
     expect(screen.queryByLabelText('Nova senha')).toBeNull()
-    expect(localStorage.getItem('token')).toBeNull()
+    expect(sessionStorage.getItem('token')).toBeNull()
   })
 })
