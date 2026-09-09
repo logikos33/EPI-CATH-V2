@@ -76,6 +76,16 @@ E o resumo separa `sem_pessoa`/`com_pessoa` **por câmera**: uma câmera em ~100
 de `sem_pessoa` enquanto as outras não é candidata a cegueira do guarda
 (contraluz, gente pequena ao fundo) — leitura que o total global apaga.
 
+CUSTO MEDIDO NO ORIN (com DeepStream a 65% e a stack toda no ar):
+  · ~710 ms de CPU por evento avaliado, a ~4 capturas de evidência por minuto
+    = 2,8 core-s/min = 4,7% de UM núcleo dos 8;
+  · +93 MB de RSS no processo do edge-sync-agent (7 -> 100 MB num processo
+    limpo: sessão onnxruntime + numpy + Pillow). O daemon roda hoje em 68 MB e
+    a unit tem MemoryHigh=256M / MemoryMax=384M — sobra folga, mas é a conta
+    que precisa ser refeita se alguém apertar o budget da unit.
+O `PersonDetector` é importado DENTRO do builder, não no topo: com
+`EDGE_GUARDA_PESSOA=off` o daemon não paga nem o import.
+
 DEGRADA PARA O LADO SEGURO, SEMPRE: detector não carregado, ONNX ausente, erro
 de inferência, frame ausente (abaixo do piso de evidência, teto estourado ou
 pausa após falha) -> veredito `indeterminado` -> **publica**. Alerta a mais é
