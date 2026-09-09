@@ -143,6 +143,59 @@ class ModelRegistryRepository(BaseRepository):
             (json.dumps(payload), str(model_id)),
         )
 
+    def get_declared_classes(
+        self, model_id: UUID, tenant_id: str
+    ) -> Optional[list[str]]:
+        """Classes que o modelo DECLARA prever — de `dataset_versions.class_distribution`.
+
+        Mesma fonte que o front usa para desenhar os chips de escopo
+        (`CameraModelScope.classesDoModelo`): chaves da distribuição, sem as
+        reservadas `__*` e sem as listadas em `__sem_suporte_treino__` (contadas
+        no dataset mas excluídas do treino — `versioning_v2.py`).
+
+        Existe para dar ao POST de model-config como recusar escopo que o
+        detector nunca vai emitir. Sem isso o handler aceitava qualquer string:
+        gravava "Capacete" no escopo de uma câmera cujo modelo não tem essa
+        classe, a tela mostrava o escopo salvo, e nenhuma violação de capacete
+        jamais aparecia — zero alertas lido como "não houve violação". O mesmo
+        perigo que `_taxonomia_do_modelo` documenta no caminho servido.
+
+        `None` = NÃO deu para provar nada (modelo sem `dataset_version_id`,
+        versão de outro tenant, ou distribuição vazia). Quem chama não pode
+        ler None como "nenhuma classe": é ausência de medida, não medida de
+        ausência — tratar assim recusaria todo escopo de todo modelo sem
+        linhagem formal de dataset.
+        """
+        model = self.get_for_tenant(model_id, tenant_id)
+        if model is None:
+            return None
+
+        dataset_version_id = model.get("dataset_version_id")
+        if not dataset_version_id:
+            return None
+
+        row = self._execute_one(
+            "SELECT class_distribution FROM dataset_versions "
+            "WHERE id = %s AND tenant_id = %s",
+            (str(dataset_version_id), str(tenant_id)),
+        )
+        distribuicao = (row or {}).get("class_distribution")
+        if isinstance(distribuicao, str):
+            try:
+                distribuicao = json.loads(distribuicao)
+            except ValueError:
+                return None
+        if not isinstance(distribuicao, dict) or not distribuicao:
+            return None
+
+        sem_suporte = distribuicao.get("__sem_suporte_treino__")
+        excluidas = set(sem_suporte) if isinstance(sem_suporte, list) else set()
+        nomes = [
+            k for k in distribuicao
+            if not k.startswith("__") and k not in excluidas
+        ]
+        return nomes or None
+
     def get_training_lineage(
         self, model_id: UUID | str, tenant_id: str
     ) -> Optional[dict[str, Any]]:
