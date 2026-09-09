@@ -109,9 +109,12 @@ import { ConfirmDialog } from '../../components/ui/ConfirmDialog/ConfirmDialog'
 import { CameraOnboardingWizard } from '../../components/cameras/CameraOnboardingWizard'
 import { CameraWizard } from '../../components/cameras/CameraWizard'
 import {
+  AvisoClassesMortas,
   ClasseChips,
   classesDoModelo,
+  classesMortas,
   draftDoDeployment as rascunhoDo,
+  draftVivo,
   mesmoConjunto,
   moduloDaCamera,
   montarConfig,
@@ -303,7 +306,13 @@ function AbaEscopo({ cameras, podeEditar }: EscopoProps) {
       setModelos(comArtefato)
       setClassesPorModelo(porModelo)
       setDeployPorCamera(porCamera)
-      setRascunhos(Object.fromEntries(ativas.map((c) => [c.id, rascunhoDo(porCamera[c.id])])))
+      // `draftVivo`, não `rascunhoDo`: classe gravada que o modelo não emite
+      // sai do rascunho (fica visível à parte) em vez de viajar invisível em
+      // todo Salvar — mesmo buraco que a aba do Estúdio tinha.
+      setRascunhos(Object.fromEntries(ativas.map((c) => {
+        const dep = porCamera[c.id]
+        return [c.id, draftVivo(dep, (dep && porModelo[dep.model_id]) || [])]
+      })))
     } catch (err) {
       // Sem isto a tabela caía no vazio e afirmava "nenhuma câmera" — falso
       // num tenant de 28 câmeras, e sem como tentar de novo.
@@ -334,7 +343,7 @@ function AbaEscopo({ cameras, podeEditar }: EscopoProps) {
       const novo = res.data?.deployment
       if (novo) {
         setDeployPorCamera((prev) => ({ ...prev, [cam.id]: novo }))
-        mudar(cam.id, rascunhoDo(novo))
+        mudar(cam.id, draftVivo(novo, classesPorModelo[novo.model_id] ?? []))
       }
     } catch (err) {
       setErro(err instanceof Error ? err.message : 'Erro ao salvar o escopo')
@@ -383,6 +392,9 @@ function AbaEscopo({ cameras, podeEditar }: EscopoProps) {
             const doModulo = modelos.filter((m) => (m.module_code || 'epi') === modulo)
             const todas = rascunho.modelId ? classesPorModelo[rascunho.modelId] ?? [] : []
             const base = rascunhoDo(dep)
+            // `base` é o GRAVADO cru (com as mortas): é o que acende o Salvar
+            // sozinho na linha que precisa de limpeza.
+            const mortas = classesMortas(base.classes, classesPorModelo[base.modelId] ?? [])
             const mudou =
               rascunho.modelId !== base.modelId || !mesmoConjunto(rascunho.classes, base.classes)
             const podeSalvar =
@@ -429,6 +441,7 @@ function AbaEscopo({ cameras, podeEditar }: EscopoProps) {
                   ) : (
                     <span className={s.rotulo}>—</span>
                   )}
+                  <AvisoClassesMortas mortas={mortas} />
                 </td>
                 <td className={s.td}>
                   {dep ? new Date(dep.created_at).toLocaleString('pt-BR') : '—'}

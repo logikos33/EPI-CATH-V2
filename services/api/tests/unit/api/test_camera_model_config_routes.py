@@ -91,6 +91,9 @@ def mocked_repos(monkeypatch):
     )
     camera_repo.get_by_id_and_tenant.return_value = _camera_row()
     registry_repo.get_for_tenant.return_value = _model_row()
+    # None = modelo sem linhagem de dataset, estado da maioria dos tenants no
+    # dia do deploy: nada a provar, nada a recusar (ver TestEscopoDoModelo).
+    registry_repo.get_declared_classes.return_value = None
     return camera_repo, deployment_repo, registry_repo
 
 
@@ -433,3 +436,80 @@ class TestDigestDoModeloParaOEdge:
             MagicMock(side_effect=RuntimeError("broker off")),
         )
         handlers._agendar_digest_do_modelo(MODEL_ID)  # não levanta
+
+
+# ---------------------------------------------------------------------------
+# Escopo ⊆ classes do modelo
+# ---------------------------------------------------------------------------
+
+class TestEscopoDoModelo:
+    """Classe que o detector não emite não pode entrar no escopo.
+
+    `validate_deployment_config` só exigia "lista não vazia de strings", então
+    o POST aceitava "Capacete" no escopo de uma câmera cujo modelo não tem essa
+    classe. A tela mostrava o escopo salvo, `_filtrar_por_escopo` comparava o
+    nome contra detecções que nunca o trariam, e saía zero alerta de capacete —
+    indistinguível de "não houve violação".
+    """
+
+    def test_classe_fora_do_modelo_recusada_com_nome(self, app, client, mocked_repos):
+        _, deployment_repo, registry_repo = mocked_repos
+        registry_repo.get_declared_classes.return_value = ["Luvas", "Sem Luvas"]
+
+        resp = client.post(
+            f"/api/cameras/{CAMERA_ID}/model-config",
+            json={"model_id": MODEL_ID, "config": {"classes": ["Luvas", "Capacete"]}},
+            headers=_token(app),
+        )
+
+        assert resp.status_code == 422
+        # A mensagem tem de dizer QUAL classe — "escopo inválido" não é acionável.
+        assert "Capacete" in resp.get_json()["error"]
+        assert "Luvas" not in resp.get_json()["error"].split(".")[0]
+        deployment_repo.create.assert_not_called()
+
+    def test_escopo_dentro_do_modelo_passa(self, app, client, mocked_repos):
+        _, deployment_repo, registry_repo = mocked_repos
+        registry_repo.get_declared_classes.return_value = ["Luvas", "Sem Luvas"]
+        deployment_repo.create.return_value = _deployment_row()
+
+        resp = client.post(
+            f"/api/cameras/{CAMERA_ID}/model-config",
+            json={"model_id": MODEL_ID, "config": {"classes": ["Luvas", "Sem Luvas"]}},
+            headers=_token(app),
+        )
+
+        assert resp.status_code == 201
+        deployment_repo.create.assert_called_once()
+
+    def test_modelo_sem_linhagem_nao_bloqueia(self, app, client, mocked_repos):
+        """None = não dá para provar. Recusar aí travaria todo tenant que
+        registrou modelo fora do pipeline formal de dataset."""
+        _, deployment_repo, registry_repo = mocked_repos
+        registry_repo.get_declared_classes.return_value = None
+        deployment_repo.create.return_value = _deployment_row()
+
+        resp = client.post(
+            f"/api/cameras/{CAMERA_ID}/model-config",
+            json={"model_id": MODEL_ID, "config": {"classes": ["QualquerCoisa"]}},
+            headers=_token(app),
+        )
+
+        assert resp.status_code == 201
+
+    def test_a_guarda_e_por_tenant(self, app, client, mocked_repos):
+        """C-01: a pergunta "quais classes este modelo declara" é feita com o
+        tenant do token, nunca só com o id do modelo."""
+        _, deployment_repo, registry_repo = mocked_repos
+        registry_repo.get_declared_classes.return_value = ["Luvas"]
+        deployment_repo.create.return_value = _deployment_row()
+
+        client.post(
+            f"/api/cameras/{CAMERA_ID}/model-config",
+            json={"model_id": MODEL_ID, "config": {"classes": ["Luvas"]}},
+            headers=_token(app),
+        )
+
+        chamada = registry_repo.get_declared_classes.call_args
+        assert str(chamada.args[0]) == MODEL_ID
+        assert str(chamada.args[1]) == TENANT

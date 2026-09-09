@@ -85,6 +85,28 @@ def _serialize(row: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     return out
 
 
+def _classes_fora_do_modelo(
+    config: dict[str, Any], declaradas: Optional[list[str]]
+) -> list[str]:
+    """Classes pedidas no escopo que o modelo NÃO declara prever.
+
+    `declaradas is None` devolve `[]` de propósito: modelo sem linhagem de
+    dataset não prova que classe nenhuma seja inválida, e recusar aí travaria
+    todo tenant que registrou modelo fora do pipeline formal. Ausência de
+    medida não é medida de ausência — a recusa só vale onde há o que medir.
+    """
+    if not declaradas:
+        return []
+    pedidas = config.get("classes")
+    if not isinstance(pedidas, list):
+        return []
+    conhecidas = set(declaradas)
+    # `dict.fromkeys` = ordem de digitação preservada, sem repetir na mensagem.
+    return list(dict.fromkeys(
+        c for c in pedidas if isinstance(c, str) and c not in conhecidas
+    ))
+
+
 def _notify_model_change(camera_id: str) -> None:
     """Invalida o detector cacheado da câmera (mesmo canal do Task 045 —
     tasks/inference.py assina camera:model_change:{camera_id})."""
@@ -220,6 +242,27 @@ def post_camera_model_config(camera_id: str):  # type: ignore[no-untyped-def]
         config_errors = validate_deployment_config(config)
         if config_errors:
             return error("Config de geometria inválida: " + "; ".join(config_errors), 400)
+
+        # ESCOPO ⊆ CLASSES DO MODELO — recusa ALTO, pelo mesmo motivo do escopo
+        # de módulo logo acima. `validate_deployment_config` só exigia "lista
+        # não vazia de strings": dava para gravar "Capacete" no escopo de uma
+        # câmera cujo modelo não tem essa classe. A tela então exibia o escopo
+        # salvo, `_filtrar_por_escopo` comparava o nome contra detecções que
+        # nunca trariam ele, e o resultado era zero alerta de capacete — lido
+        # como "não houve violação", que é o pior desfecho possível num
+        # produto de segurança. Aceitar em silêncio é afirmar uma capacidade
+        # que não existe; recusar transforma em pergunta respondível.
+        declaradas = _get_registry_repo().get_declared_classes(model_uuid, tenant_id)
+        fora = _classes_fora_do_modelo(config, declaradas)
+        if fora:
+            return error(
+                "Classes fora do que este modelo prevê: "
+                + ", ".join(fora)
+                + ". O detector nunca emite essas classes — no escopo elas não "
+                "gerariam alerta nenhum. Desmarque-as ou aponte um modelo "
+                "treinado com elas.",
+                422,
+            )
 
         deployment_repo = _get_deployment_repo()
         deployment_repo.deactivate_active_for_camera(

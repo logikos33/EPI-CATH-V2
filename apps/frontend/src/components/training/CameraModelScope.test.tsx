@@ -408,6 +408,83 @@ describe('CameraModelScope — aviso curto que expande (o texto integral empurra
   })
 })
 
+/**
+ * Classe GRAVADA no escopo que o modelo NÃO emite.
+ *
+ * O escopo das 17 câmeras da RVB foi semeado direto no banco com o catálogo
+ * inteiro do tenant (14 classes), mas o modelo servido emite 10 — Capacete,
+ * Sem Capacete, Colete e Sem Colete não estão nele. A tela renderizava chips
+ * SÓ para as classes do modelo, então as 4 extras ficavam invisíveis: o dono
+ * não via que estavam lá, não tinha como tirar, e cada Salvar as reenviava.
+ * Pior, `mudou` comparava o rascunho (14) com o gravado (14) e dava false —
+ * a linha parecia em dia. Resultado: "Capacete no escopo" para sempre, sem
+ * nunca virar alerta, porque o detector não emite essa classe.
+ */
+describe('CameraModelScope — classe no escopo que o modelo não emite', () => {
+  const COM_CLASSE_MORTA = {
+    ...DEPLOY,
+    config: { ...DEPLOY.config, classes: ['Luvas', 'Oculos', 'Capacete'] },
+  }
+
+  beforeEach(() => {
+    const original = mocks.get.getMockImplementation()!
+    mocks.get.mockImplementation(async (path: string) =>
+      path === '/cameras/model-config?module=epi'
+        ? { success: true, data: { deployments: { 'cam-1': COM_CLASSE_MORTA } } }
+        : original(path),
+    )
+  })
+
+  it('a classe morta aparece na tela — invisível, o dono não sabe que está lá', async () => {
+    render(<CameraModelScope classesCatalogo={[]} />)
+    await waitFor(() => expect(screen.getByLabelText('Classe Luvas em Canal 8')).toBeDefined())
+
+    expect(screen.getByText(/1 classe no escopo que este modelo não emite/i)).toBeDefined()
+    expect(screen.getByText(/Capacete/)).toBeDefined()
+    // Não vira chip de escopo: marcar/desmarcar ali não mudaria nada no mundo.
+    expect(screen.queryByLabelText('Classe Capacete em Canal 8')).toBeNull()
+  })
+
+  it('Salvar sai habilitado e o POST vai sem ela — um clique limpa a linha', async () => {
+    render(<CameraModelScope classesCatalogo={[]} />)
+    await waitFor(() => expect(screen.getByLabelText('Classe Luvas em Canal 8')).toBeDefined())
+
+    const salvar = screen.getByLabelText('Salvar escopo de Canal 8') as HTMLButtonElement
+    expect(salvar.disabled).toBe(false)
+    fireEvent.click(salvar)
+
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1))
+    expect(mocks.post.mock.calls[0][1].config.classes).toEqual(['Luvas', 'Oculos'])
+    // Deployment devolvido já limpo → o aviso some e o botão volta a travar
+    await waitFor(() => expect(screen.queryByText(/não emite/i)).toBeNull())
+  })
+
+  it('mexer em OUTRA classe não reenvia a morta às escondidas', async () => {
+    render(<CameraModelScope classesCatalogo={[]} />)
+    await waitFor(() => expect(screen.getByLabelText('Classe Oculos em Canal 8')).toBeDefined())
+
+    fireEvent.click(screen.getByLabelText('Classe Oculos em Canal 8'))
+    fireEvent.click(screen.getByLabelText('Salvar escopo de Canal 8'))
+
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1))
+    expect(mocks.post.mock.calls[0][1].config.classes).not.toContain('Capacete')
+  })
+
+  it('modelo que não declara classes: nada é declarado morto (não dá para provar)', async () => {
+    const original = mocks.get.getMockImplementation()!
+    mocks.get.mockImplementation(async (path: string) =>
+      path === '/v1/models/m-v9'
+        ? { success: true, data: { model: { id: 'm-v9' }, lineage: { dataset_version: { class_distribution: {} } } } }
+        : original(path),
+    )
+    render(<CameraModelScope classesCatalogo={[]} />)
+    await waitFor(() => expect(screen.getByLabelText('Modelo da câmera Canal 8')).toBeDefined())
+
+    expect(screen.queryByText(/não emite/i)).toBeNull()
+    expect((screen.getByLabelText('Salvar escopo de Canal 8') as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
 describe('helpers puros', () => {
   it('classesDoModelo ignora chaves reservadas, subtrai __sem_suporte_treino__ e cai no catálogo quando vazio', () => {
     expect(classesDoModelo({ Luvas: 1, __sem_suporte_treino__: ['x'] }, ['cat'])).toEqual(['Luvas'])

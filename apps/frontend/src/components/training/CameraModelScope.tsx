@@ -141,6 +141,38 @@ export function draftDoDeployment(dep: ModelDeployment | undefined): Draft {
   return { modelId: dep.model_id, classes: Array.isArray(classes) ? classes : [] }
 }
 
+/** Classes do escopo GRAVADO que o modelo NÃO emite — "classes mortas".
+ *
+ * O escopo das câmeras da RVB foi semeado direto no banco com o catálogo do
+ * tenant (14 classes), mas o modelo servido emite 10: Capacete, Sem Capacete,
+ * Colete e Sem Colete não estão nele. Como a tela só desenhava chip para as
+ * classes DO MODELO, essas 4 ficavam invisíveis — o dono não via que estavam
+ * gravadas, não tinha como tirar, e todo Salvar as reenviava. `mudou` ainda
+ * comparava rascunho (14) com gravado (14) e dava false, então a linha
+ * parecia em dia. O escopo então dizia "Capacete" para sempre sem nunca
+ * virar alerta, porque `_filtrar_por_escopo` compara nomes e o detector
+ * nunca emite esse.
+ *
+ * `doModelo` vazio devolve `[]` de propósito: modelo que não declara classes
+ * não prova que nenhuma delas é morta. Chamar de morto o que não se pode
+ * medir é o mesmo erro, de cabeça para baixo. */
+export function classesMortas(escopo: string[], doModelo: string[]): string[] {
+  if (doModelo.length === 0) return []
+  return escopo.filter(c => !doModelo.includes(c))
+}
+
+/** Escopo EDITÁVEL da câmera: o gravado MENOS as classes mortas.
+ *
+ * Some do rascunho para que o próximo Salvar as tire do banco em vez de
+ * reenviá-las — e, como `base` continua sendo o gravado cru
+ * (`draftDoDeployment`), a diferença acende o botão Salvar sozinha: a linha
+ * que precisa de limpeza se anuncia, em vez de mentir que está em dia. */
+export function draftVivo(dep: ModelDeployment | undefined, doModelo: string[]): Draft {
+  const draft = draftDoDeployment(dep)
+  const mortas = classesMortas(draft.classes, doModelo)
+  return mortas.length ? { ...draft, classes: draft.classes.filter(c => !mortas.includes(c)) } : draft
+}
+
 /** Botão-chip para (des)marcar UMA classe no escopo — substitui o
  * `<input type=checkbox>` nativo (achado B2, rodada UX 2026-08): tokenizado
  * (usa `vars`, branco-rotulado por tenant), altura de 1 linha, sem o
@@ -213,6 +245,20 @@ export function ClasseChips({ classes, selecionadas, podeEditar, nomeCamera, onA
         <span style={{ fontSize: 11, color: vars.color.warning }}>marque ≥1 classe</span>
       )}
     </div>
+  )
+}
+
+/** Aviso de classes mortas — NÚCLEO COMPARTILHADO com `app/epi/Cameras.tsx`
+ * (aba Escopo), que tinha o mesmo buraco. Nomeia as classes em vez de só
+ * contá-las: "1 classe que o modelo não emite" sem dizer QUAL não dá para
+ * conferir contra a taxonomia do cliente. */
+export function AvisoClassesMortas({ mortas }: { mortas: string[] }) {
+  if (mortas.length === 0) return null
+  const plural = mortas.length > 1 ? 's' : ''
+  return (
+    <span style={{ display: 'block', marginTop: 5, fontSize: 11, color: vars.color.warning }}>
+      {`${mortas.length} classe${plural} no escopo que este modelo não emite (${mortas.join(', ')}) — marcada${plural} no banco, mas nunca vira${mortas.length > 1 ? 'm' : ''} alerta. Salvar remove.`}
+    </span>
   )
 }
 
@@ -305,7 +351,12 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
       })
       const novos: Record<string, Draft> = {}
       for (const c of ativas) {
-        novos[c.id] = draftDoDeployment(porCamera[c.id])
+        const dep = porCamera[c.id]
+        // `draftVivo`, não `draftDoDeployment`: classe gravada que o modelo
+        // não emite sai do rascunho (fica visível à parte) em vez de viajar
+        // invisível em todo Salvar. Compara contra o que o MODELO declara —
+        // nunca contra o catálogo do tenant, que é só fallback de nomes.
+        novos[c.id] = draftVivo(dep, (dep && porModelo[dep.model_id]) || [])
       }
       setCameras(ativas)
       setModels(comArtefato)
@@ -341,7 +392,7 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
       const novo = res.data?.deployment
       if (novo) {
         setDeploymentByCamera(prev => ({ ...prev, [cam.id]: novo }))
-        setDraft(cam.id, draftDoDeployment(novo))
+        setDraft(cam.id, draftVivo(novo, classesDeclaradas[novo.model_id] ?? []))
       }
       toast.success(`Modelo e escopo salvos para ${cam.name}`)
     } catch (err) {
@@ -472,6 +523,9 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
             const model = models.find(m => m.id === draft.modelId)
             const todas = draft.modelId ? classesOferecidas(draft.modelId) : []
             const base = draftDoDeployment(dep)
+            // `base` é o GRAVADO cru (com as mortas): é o que faz `mudou`
+            // acender sozinho na linha que precisa de limpeza.
+            const mortas = classesMortas(base.classes, classesDeclaradas[base.modelId] ?? [])
             const mudou = draft.modelId !== base.modelId || !mesmoConjunto(draft.classes, base.classes)
             const podeSalvar = podeEditar && saving !== cam.id && mudou && !!draft.modelId && draft.classes.length > 0
             const framework = model?.framework ? FRAMEWORK_LABELS[model.framework] ?? model.framework : null
@@ -519,6 +573,7 @@ export function CameraModelScope({ classesCatalogo }: { classesCatalogo: YoloCla
                   ) : (
                     <span style={{ color: vars.color.textMuted }}>—</span>
                   )}
+                  <AvisoClassesMortas mortas={mortas} />
                 </td>
                 {/* Data curta na célula, data completa no `title`: o formato
                     longo ("21/08/2026 07:00:00") era o que mais alargava a
