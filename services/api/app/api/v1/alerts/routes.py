@@ -256,6 +256,94 @@ def usage_rate():  # type: ignore[no-untyped-def]
         return error("Erro interno", 500)
 
 
+_MAX_IDS_LOTE = 500
+
+
+def _uuids_validos(valores):  # type: ignore[no-untyped-def]
+    """Lista de ids → (lista normalizada, erro). Fronteira de confiança.
+
+    O id vai para um `::uuid[]` no SQL: string malformada estouraria no cast
+    e viraria 500. Aqui vira 400, que é a verdade (o cliente mandou lixo).
+    """
+    if not isinstance(valores, list) or not (0 < len(valores) <= _MAX_IDS_LOTE):
+        return None, f"ids deve ser uma lista de 1 a {_MAX_IDS_LOTE} identificadores"
+    limpos = []
+    for v in valores:
+        if not isinstance(v, str):
+            return None, "cada id deve ser uma string UUID"
+        try:
+            limpos.append(str(UUID(v)))
+        except ValueError:
+            return None, "cada id deve ser um UUID válido"
+    return limpos, None
+
+
+@alerts_bp.route("/acknowledge", methods=["POST"])
+@jwt_required()
+def acknowledge_alerts_lote():  # type: ignore[no-untyped-def]
+    """Reconhece VÁRIOS alertas numa requisição só.
+
+    Body — uma das duas formas, nunca as duas ausentes:
+
+        {"ids": ["<uuid>", ...]}                     → só esses (1..500)
+        {"all": true, "kind": "violation"}           → TODOS os pendentes do
+                                                       recorte (aceita também
+                                                       "camera_id")
+
+    Por que existe: o "marcar todas como lida" era um laço no CLIENTE sobre
+    `POST /<id>/acknowledge`. Com 235 pendentes isso é 235 requisições — e uma
+    falha no meio deixava o operador sem saber o que ficou marcado.
+
+    `all` tem de vir EXPLÍCITO como `true`: corpo vazio (ou `{}` de um cliente
+    com bug) nunca pode significar "reconheça tudo o que existe". Sem `ids` e
+    sem `all`, é 400.
+
+    Rota estática declarada ANTES de `/<alert_id>` — mesma leitura humana da
+    `usage-rate`.
+    """
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return error("Corpo deve ser um objeto JSON", 400)
+
+    ids = None
+    if "ids" in body:
+        ids, erro = _uuids_validos(body.get("ids"))
+        if erro:
+            return error(erro, 400)
+    elif body.get("all") is not True:
+        return error('Informe "ids" ou "all": true', 400)
+
+    camera_id = body.get("camera_id")
+    if camera_id is not None:
+        if not isinstance(camera_id, str):
+            return error("camera_id deve ser uma string UUID", 400)
+        try:
+            camera_id = str(UUID(camera_id))
+        except ValueError:
+            return error("camera_id deve ser um UUID válido", 400)
+
+    try:
+        total = _get_repo().acknowledge_many(
+            tenant_id=str(get_tenant_id()),
+            ids=ids,
+            # `_parse_kind` descarta valor fora do contrato A1 → None (= sem
+            # recorte de polaridade). Nunca 500 por corpo torto.
+            kind=_parse_kind(body.get("kind")),
+            camera_id=camera_id,
+        )
+    except EpiMonitorError:
+        raise
+    except Exception as exc:
+        logger.error("acknowledge_alerts_lote_error: %s", exc, exc_info=True)
+        return error("Erro interno", 500)
+
+    # `acknowledged` = quantas MUDARAM de estado, não quantas foram pedidas: id
+    # de outro tenant, id inexistente e id já reconhecido não entram na conta.
+    # Quem chama mostra esse número — inflá-lo com o len(ids) seria afirmar
+    # trabalho que não aconteceu.
+    return success({"acknowledged": total, "requested": len(ids) if ids is not None else None})
+
+
 @alerts_bp.route("/<alert_id>", methods=["GET"])
 @jwt_required()
 def get_alert(alert_id: str):  # type: ignore[no-untyped-def]

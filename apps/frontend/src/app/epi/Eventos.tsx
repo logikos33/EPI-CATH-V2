@@ -79,6 +79,7 @@ import { useToast } from '../../components/ui/Toast/useToast'
 import { api, ApiError } from '../../services/api'
 import { cameraService } from '../../services/cameraService'
 import { confiancaInternaOuCliente } from '../../services/confidenceDisplay'
+import { marcarLidas } from '../../services/notificacoes'
 import { classificarLatencia } from '../../components/shared/ProcedenciaBadge'
 import { procedenciaDeclarada } from '../../components/shared/ProcedenciaEvento'
 import { vereditoHumano, type Veredito } from '../../components/shared/VereditoHumano'
@@ -426,14 +427,30 @@ export function Eventos() {
     }
   }
 
+  /**
+   * Reconhecer a SELEÇÃO — UMA requisição, não uma por linha.
+   *
+   * Era `Promise.all` sobre `POST /alerts/<id>/acknowledge`: com 100 linhas
+   * marcadas, 100 requisições em paralelo, cada uma com JWT e UPDATE próprios.
+   * Além do custo, o modo de falha era ruim de explicar — "37 de 100 não
+   * puderam ser reconhecidos", sem dizer QUAIS, e com a lista já recarregada
+   * por baixo. A rota em lote decide tudo numa transação e devolve quantas
+   * MUDARAM de estado.
+   */
   const reconhecerSelecionados = async () => {
     setOcupado('lote')
     const alvos = [...selecionados]
-    const falhas = await Promise.all(
-      alvos.map((id) => api.post(`/alerts/${id}/acknowledge`).then(() => 0).catch(() => 1)),
-    )
-    const erros = falhas.reduce<number>((a, b) => a + b, 0)
-    if (erros) toast.error(`${erros} de ${alvos.length} não puderam ser reconhecidos`)
+    try {
+      const quantas = await marcarLidas(alvos)
+      // O número vem do backend. Se ele vier menor que o pedido, alguma linha
+      // já estava reconhecida (outro operador chegou antes) — dizer isso é
+      // mais honesto que anunciar sucesso sobre trabalho que não aconteceu.
+      if (quantas < alvos.length) {
+        toast.info(`${quantas} de ${alvos.length} reconhecidos (o restante já estava)`)
+      }
+    } catch {
+      toast.error('Não foi possível reconhecer os eventos selecionados')
+    }
     setSelecionados([])
     setOcupado(null)
     await carregar()
@@ -443,12 +460,16 @@ export function Eventos() {
    * Veredito humano — reusa `POST /api/verification/<id>/review`, que carimba
    * `verified_by='user:<id>'` (a prova que a coluna VEREDITO lê).
    *
-   * O MOTIVO (`reason`) é OPCIONAL AQUI e obrigatório na gaveta de evidência.
-   * Os dois botões da LINHA seguem indo sem motivo, exatamente como hoje —
-   * nunca com motivo vazio, que gravaria "justificado" sobre uma justificativa
-   * que ninguém deu. Quem abre a evidência para julgar escolhe um motivo da
-   * lista fechada, igual à tela de Verificação: lá a pessoa está OLHANDO o
-   * frame, e é dali que sai a informação que recalibra o modelo.
+   * A assinatura AINDA aceita 'reject' porque é o contrato da rota, mas desta
+   * tela só sai 'approve': a linha não rejeita mais (ver o comentário do grupo
+   * de botões, abaixo).
+   *
+   * O MOTIVO (`reason`) não vem daqui. Quem abre a evidência para julgar
+   * escolhe um motivo da lista fechada, igual à tela de Verificação: lá a
+   * pessoa está OLHANDO o frame, e é dali que sai a informação que recalibra o
+   * modelo. Da linha o veredito vai SEM motivo — nunca com motivo vazio, que
+   * gravaria "justificado" sobre uma justificativa que ninguém deu. O motivo
+   * já registrado aparece abaixo do selo.
    *
    * Devolve o desfecho em vez de engoli-lo: a gaveta precisa saber se avança
    * (veredito registrado, ou 409 de quem julgou primeiro) ou se fica onde
@@ -708,6 +729,25 @@ export function Eventos() {
               {labelForVerificationReason(ev.verification_reason)}
             </span>
           )}
+          {/* ASSIMETRIA DELIBERADA — não "conserte" devolvendo o botão de
+              rejeitar aqui.
+
+              CONFIRMAR sem abrir é barato e reversível no sentido certo: a
+              linha JÁ mostra câmera, classe, horário e polaridade; concordar
+              com o que o detector afirmou não acrescenta afirmação nenhuma ao
+              acervo. REJEITAR é o contrário — é dizer "a máquina errou", e
+              esse veredito vira dado de treino: é dele que sai a recalibração.
+              Rejeitar sem ter olhado o frame envenena o acervo com ruído que
+              ninguém consegue auditar depois, e o `reject` sem `reason` é
+              justamente o que não se consegue reler ("errou por quê?").
+
+              Antes existia aqui um botão "Falso positivo" que mandava veredito
+              SEM motivo, enquanto a evidência exige motivo estruturado. Isso
+              fazia da regra do motivo um pedágio contornável a um clique de
+              distância — e quem está com pressa usa o atalho, sempre. Então o
+              atalho deixou de existir: quem rejeita passa pela evidência.
+
+              O link abaixo é a SAÍDA — some o controle, não o caminho. */}
           {veredito === 'nao-revisado' && podeJulgar && (
             <span className={s.grupoBotoes}>
               <button
@@ -717,13 +757,14 @@ export function Eventos() {
               >
                 Procedente
               </button>
-              <button
+              <NavLink
                 className={s.botao}
-                disabled={ocupado === ev.id}
-                onClick={() => void julgar(ev.id, 'reject')}
+                to={rotaNova(`/epi/eventos/${ev.id}`)}
+                aria-label="Abrir a evidência para marcar falso positivo"
+                title="Falso positivo se decide olhando o frame — e o motivo vai junto. Abre a evidência deste evento."
               >
-                Falso positivo
-              </button>
+                Falso positivo? →
+              </NavLink>
             </span>
           )}
         </td>

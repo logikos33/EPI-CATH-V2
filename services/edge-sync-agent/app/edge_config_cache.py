@@ -49,6 +49,12 @@ class ChannelMapCache:
     # convive no MESMO arquivo/cache por ser escrito no mesmo poll. Ausente em
     # arquivos gravados antes desta mudança -> {} (default_factory), nunca None.
     collection_subtype_map: dict[str, int] = field(default_factory=dict)
+    # Eixo OPERAÇÃO: camera_id -> fps_target (quadros por segundo que a
+    # INFERÊNCIA deve ver nessa câmera). Distinto do collection_subtype acima,
+    # que é o eixo COLETA. Sem este mapa o gerador do DeepStream só sabia um
+    # `interval` GLOBAL, e o valor que o dono escolhe na tela por câmera não
+    # chegava ao box — o elo estava rompido desde a ADR-0055.
+    fps_target_map: dict[str, int] = field(default_factory=dict)
 
 
 def write_channel_map(
@@ -56,6 +62,7 @@ def write_channel_map(
     channel_map: dict[str, int],
     config_version: str,
     collection_subtype_map: dict[str, int] | None = None,
+    fps_target_map: dict[str, int] | None = None,
 ) -> None:
     """Atomically persists *channel_map* (best-effort — NEVER raises).
 
@@ -74,6 +81,7 @@ def write_channel_map(
             "channel_map": channel_map,
             "config_version": config_version,
             "collection_subtype_map": collection_subtype_map or {},
+            "fps_target_map": fps_target_map or {},
         })
         fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), prefix=".config_cache-")
         try:
@@ -130,8 +138,21 @@ def read_channel_map(path: str) -> ChannelMapCache | None:
                     path, k, v,
                 )
 
+    fps_target_map: dict[str, int] = {}
+    raw_fps_map = data.get("fps_target_map")
+    if isinstance(raw_fps_map, dict):
+        for k, v in raw_fps_map.items():
+            try:
+                fps_target_map[str(k)] = int(v)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "edge_config_cache_fps_target_corrupt path=%s camera=%s value=%r",
+                    path, k, v,
+                )
+
     return ChannelMapCache(
         channel_map=channel_map,
         config_version=config_version,
         collection_subtype_map=collection_subtype_map,
+        fps_target_map=fps_target_map,
     )
