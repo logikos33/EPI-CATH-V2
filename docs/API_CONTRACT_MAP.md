@@ -235,7 +235,7 @@ FE: `edgeService.ts` (`getOverview, getSitesHealth, getSiteHeartbeats, getHeartb
 | GET | `.../commands/pending` | device auth (long-poll) | `success({commands,count})` | — | |
 | PATCH | `.../commands/<id>` | device auth | `success({command})` | — | |
 | GET | `/api/v1/edge/commands` | jwt custom **sem checagem extra de role/permission** | `success({commands,count})` | — | **Achado**: única rota GET deste conjunto que qualquer usuário JWT do tenant pode chamar (as POST exigem admin) — não valida ownership explícito de `site_id` antes de listar; depende do repository filtrar corretamente |
-| POST | `/api/v1/edge/events/ingest` | device auth RS256 (extração correta do token) | `success({ingested,submitted,batch_id})` | `uploader.py` (após F0) | ~~P0 achado #8~~ **RESOLVIDO** (WS10): extrai o Bearer corretamente (`removeprefix`), como `/heartbeat`. `/edge/detections` NÃO existe — canônico = este endpoint (uploader aponta para cá) |
+| POST | `/api/v1/edge/events/ingest` | device auth RS256 (extração correta do token) | `success({ingested,submitted,batch_id,alerts_created,alerts_failed})` | `uploader.py` (após F0) | ~~P0 achado #8~~ **RESOLVIDO** (WS10): extrai o Bearer corretamente (`removeprefix`), como `/heartbeat`. `/edge/detections` NÃO existe — canônico = este endpoint (uploader aponta para cá). Evento `detection` também vira linha em `public.alerts` (mesmos portões do caminho servido); `alerts_failed>0` é FALHA visível, não "nada encontrado" |
 | GET | `/api/v1/edge/events` | jwt custom sem checagem extra | `success({events,count})` | — | mesmo padrão de "sem validação explícita de ownership de site_id" do GET commands |
 
 ---
