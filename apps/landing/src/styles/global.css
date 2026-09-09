@@ -1,0 +1,5 @@
+/* Base do Tailwind. Antes vinha injetada pela integração @astrojs/tailwind;
+   sem ela, o import explícito no Layout é o que carrega as diretivas. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
