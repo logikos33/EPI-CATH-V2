@@ -138,6 +138,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from . import anatomia
+
 logger = logging.getLogger(__name__)
 
 MODO_OFF = "off"
@@ -169,6 +171,12 @@ _FAIXAS_CONTENCAO = (0.0, 0.25, 0.50, 0.75)
 _UNIDADE_STREAMMUX = "pixels_xywh_streammux"
 _UNIDADE_FRAME = "pixels_xywh_frame_original"
 
+#: `EDGE_GUARDA_ANATOMIA=barrar` liga o corte por parte do corpo. Nasce em
+#: "só mede" pelo mesmo motivo da contenção: a régua é grosseira (não há pose,
+#: só a caixa da pessoa) e quem assume o risco de silenciar é o dono do produto.
+_ANATOMIA_SO_MEDE = "medir"
+_ANATOMIA_BARRAR = "barrar"
+
 
 @dataclass(frozen=True)
 class Veredito:
@@ -181,6 +189,9 @@ class Veredito:
     contencao: float | None = None
     caixas: int = 0
     pessoas: int = 0
+    #: `False` = alguma caixa caiu numa parte do corpo incompatível com a
+    #: classe (máscara no joelho). `None` = indeterminado, nunca reprovado.
+    anatomia_ok: bool | None = None
 
     @property
     def rotulo(self) -> str:
@@ -205,6 +216,7 @@ class GuardaPessoa:
         ring_max: int = _DEFAULT_RING_MAX,
         alta_confianca: float = _ALTA_CONFIANCA,
         piso_contencao: float = _DEFAULT_PISO_CONTENCAO,
+        anatomia: str = _ANATOMIA_SO_MEDE,
     ) -> None:
         self._detector = detector
         self._modo = modo if modo in _MODOS else MODO_SOMBRA
@@ -212,6 +224,9 @@ class GuardaPessoa:
         self._ring_max = max(0, ring_max)
         self._alta = alta_confianca
         self._piso_contencao = piso_contencao
+        self._anatomia = (
+            anatomia if anatomia in (_ANATOMIA_SO_MEDE, _ANATOMIA_BARRAR) else _ANATOMIA_SO_MEDE
+        )
         self._ring_i = 0
         self._avaliados = 0
         self._indeterminados = 0
@@ -222,6 +237,10 @@ class GuardaPessoa:
         # harness nenhum: um turno de tráfego e o corte aparece.
         self._faixas_contencao: dict[str, int] = {}
         self._sem_projecao = 0
+        # {"plausivel"|"lugar_errado"|"indeterminado": n} — o mesmo censo que
+        # mediu 175 de 420 caixas na parte errada do corpo.
+        self._anatomia_censo: dict[str, int] = {}
+        self._barrados_por_anatomia = 0
         # {camera_id: [sem_pessoa, com_pessoa]} — a RAZÃO por câmera é o que
         # denuncia cegueira do guarda; o total global não denuncia nada.
         self._por_camera: dict[str, list[int]] = {}
@@ -258,6 +277,10 @@ class GuardaPessoa:
             "contencao": None if v.contencao is None else round(v.contencao, 3),
             "pessoas": v.pessoas,
             "piso_contencao": self._piso_contencao,
+            # `None` = indeterminado (pessoa sentada/cortada, ou classe fora do
+            # mapa). Diferente de `False`, que é "caiu na parte errada".
+            "anatomia_ok": v.anatomia_ok,
+            "anatomia": self._anatomia,
         }
         self._contar(camera_id, v)
 
@@ -269,11 +292,15 @@ class GuardaPessoa:
             and self._piso_contencao > 0.0
             and v.contencao < self._piso_contencao
         )
-        if v.tem_pessoa and not fora_de_pessoa:
+        # SÓ `is False` barra: `None` é indeterminado e publica, sempre.
+        parte_errada = self._anatomia == _ANATOMIA_BARRAR and v.anatomia_ok is False
+        if v.tem_pessoa and not fora_de_pessoa and not parte_errada:
             return True
 
         if fora_de_pessoa:
             self._barrados_por_contencao += 1
+        if parte_errada:
+            self._barrados_por_anatomia += 1
         self._barrados += 1
         conf_epi = _confianca_epi(payload)
         if conf_epi >= self._alta:
@@ -283,7 +310,8 @@ class GuardaPessoa:
                 "classes=%s motivo=%s — o modelo de EPI afirma com força e o "
                 "detector discorda; frame no anel %s para auditoria",
                 camera_id, conf_epi, _classes(payload),
-                "caixa_fora_de_pessoa" if fora_de_pessoa else "quadro_sem_pessoa",
+                "caixa_fora_de_pessoa" if fora_de_pessoa
+                else ("caixa_na_parte_errada" if parte_errada else "quadro_sem_pessoa"),
                 self._ring_dir,
             )
         for classe in _classes(payload):
@@ -299,7 +327,7 @@ class GuardaPessoa:
 
         quadro = _tamanho_do_quadro(frame_bytes)
         pessoas = _pessoas_em_fracao(r, quadro) if quadro else []
-        contencao, caixas = _anotar_contencao(payload, pessoas, quadro)
+        contencao, caixas, anat = _anotar_contencao(payload, pessoas, quadro)
         return Veredito(
             tem_pessoa=bool(getattr(r, "found", False)),
             indeterminado=False,
@@ -308,6 +336,7 @@ class GuardaPessoa:
             contencao=contencao,
             caixas=caixas,
             pessoas=len(pessoas),
+            anatomia_ok=anat,
         )
 
     # ── contadores ───────────────────────────────────────────────────────────
@@ -319,6 +348,8 @@ class GuardaPessoa:
         else:
             par = self._por_camera.setdefault(camera_id, [0, 0])
             par[1 if v.tem_pessoa else 0] += 1
+        rotulo = {True: "plausivel", False: "lugar_errado", None: "indeterminado"}[v.anatomia_ok]
+        self._anatomia_censo[rotulo] = self._anatomia_censo.get(rotulo, 0) + 1
         if v.contencao is None:
             self._sem_projecao += 1
         else:
@@ -341,6 +372,11 @@ class GuardaPessoa:
             "contencao": dict(self._faixas_contencao),
             "contencao_sem_projecao": self._sem_projecao,
             "piso_contencao": self._piso_contencao,
+            "barrados_por_anatomia": self._barrados_por_anatomia,
+            # {"plausivel"|"lugar_errado"|"indeterminado": n} — mede o que a
+            # contenção sozinha não vê: caixa sobre a pessoa, na parte errada.
+            "anatomia": dict(self._anatomia_censo),
+            "modo_anatomia": self._anatomia,
             "classes_barradas": dict(self._classes_barradas),
             # {camera: [sem_pessoa, com_pessoa]}
             "por_camera": {c: list(p) for c, p in self._por_camera.items()},
@@ -483,8 +519,10 @@ def _contencao_da_caixa(caixa: _Ret, pessoas: list[_Ret]) -> float:
 
 def _anotar_contencao(
     payload: dict, pessoas: list[_Ret], quadro: tuple[float, float] | None
-) -> tuple[float | None, int]:
-    """Grava `contencao` em cada detecção projetável; devolve (máximo, quantas).
+) -> tuple[float | None, int, bool | None]:
+    """Grava `contencao` e `anatomia_ok` em cada detecção projetável.
+
+    Devolve (contenção máxima, quantas caixas, veredito anatômico do evento).
 
     O máximo, e não a média: basta UMA caixa cair sobre alguém para o evento ser
     plausível. Média puniria o evento por caixas extras do mesmo modelo.
@@ -495,6 +533,7 @@ def _anotar_contencao(
     """
     deteccoes = payload.get("detections") or []
     valores: list[float] = []
+    vereditos: list[bool | None] = []
     for det in deteccoes:
         if not isinstance(det, dict):
             continue
@@ -504,7 +543,23 @@ def _anotar_contencao(
         c = _contencao_da_caixa(caixa, pessoas)
         det["contencao"] = round(c, 3)
         valores.append(c)
-    return (max(valores) if valores else None), len(valores)
+        # A parte do corpo é pergunta SEPARADA da contenção, e a resposta vai
+        # junto na detecção: `violations` sobe cru para `alerts`, então um turno
+        # de tráfego vira consulta SQL com o veredito humano ao lado.
+        ok, pos = anatomia.plausivel(det.get("class"), caixa, pessoas)
+        det["anatomia_ok"] = ok
+        if pos is not None:
+            det["posicao_no_corpo"] = round(pos, 3)
+        vereditos.append(ok)
+    # `False` só se ALGUMA caixa está na parte errada; `True` exige ao menos uma
+    # decidida e nenhuma errada; senão `None` (indeterminado).
+    if any(v is False for v in vereditos):
+        anat: bool | None = False
+    elif any(v is True for v in vereditos):
+        anat = True
+    else:
+        anat = None
+    return (max(valores) if valores else None), len(valores), anat
 
 
 def _faixa(contencao: float) -> str:
@@ -567,17 +622,23 @@ def build_guarda_pessoa_from_env(env: dict[str, str] | None = None) -> GuardaPes
         )
         return None
     piso = _parse_piso(source.get("EDGE_GUARDA_CONTENCAO", ""))
+    anat = source.get("EDGE_GUARDA_ANATOMIA", _ANATOMIA_SO_MEDE).strip().lower()
+    if anat not in (_ANATOMIA_SO_MEDE, _ANATOMIA_BARRAR):
+        logger.warning("EDGE_GUARDA_ANATOMIA inválido (%r) — só medindo", anat)
+        anat = _ANATOMIA_SO_MEDE
     guarda = GuardaPessoa(
         detector,
         modo=modo,
         ring_dir=source.get("EDGE_GUARDA_RING_DIR", _DEFAULT_RING_DIR),
         ring_max=int(source.get("EDGE_GUARDA_RING_MAX", str(_DEFAULT_RING_MAX))),
         piso_contencao=piso,
+        anatomia=anat,
     )
     logger.info(
-        "guarda_pessoa_pronto modo=%s piso_contencao=%.2f%s",
+        "guarda_pessoa_pronto modo=%s piso_contencao=%.2f anatomia=%s%s",
         modo,
         piso,
+        anat,
         " — NADA é barrado, só medido"
         if modo == MODO_SOMBRA
         else (" — contenção só MEDE (piso 0)" if piso <= 0 else ""),

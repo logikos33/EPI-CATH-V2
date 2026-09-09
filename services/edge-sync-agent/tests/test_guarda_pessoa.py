@@ -105,6 +105,8 @@ def test_sombra_nao_barra_nada_mas_marca_o_payload(tmp_path):
         # `None` e nao 0.0: este payload nao tem bbox nenhuma, entao nao houve o
         # que conter. Zero seria "olhei e a caixa nao cai em ninguem".
         "contencao": None, "pessoas": 0, "piso_contencao": 0.0,
+        # `None` e nao False: sem caixa nenhuma nao ha parte do corpo a julgar.
+        "anatomia_ok": None, "anatomia": "medir",
     }
     assert g.resumo()["barrados"] == 0
     assert list(tmp_path.iterdir()) == [], "em sombra o frame já está no R2"
@@ -367,3 +369,92 @@ def test_piso_invalido_cai_em_so_mede_nunca_em_barra_mais(raw, esperado):
     from app.guarda_pessoa import _parse_piso
 
     assert _parse_piso(raw) == esperado
+
+
+# ── anatomia: a caixa caiu na parte certa do corpo? ─────────────────────────
+#
+# A contencao pergunta "cai sobre alguem?". Esta pergunta e outra: "cai sobre a
+# parte do corpo que a classe exige?". Medido em 09/09 sobre os 679 alertas da
+# fila, entre os que JA PASSARAM na contencao: 175 de 420 caixas caem na parte
+# errada — em `Sem protetor de ouvido`, 132 contra 131.
+
+
+def test_mascara_na_perna_passa_pela_contencao_e_e_pega_pela_anatomia():
+    """O caso que originou tudo: contencao 100%, mascara no joelho."""
+    pessoa = _Caixa(x=100, y=100, w=200, h=800)          # em pe, 100..900 em y
+    g = _guarda(_ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.99))
+    # 1080 * (500/720) = 750 px -> ~81% da altura da pessoa: perna.
+    payload = _payload_com_caixa((100, 500, 60, 40), frame_wh=(1280, 720))
+    payload["detections"][0]["class"] = "Uso incorreto de mascara"
+
+    assert g.julgar("cam-1", payload, _jpeg()) is True   # modo "medir": nao barra
+    assert payload["detections"][0]["contencao"] == 1.0, "a contencao APROVA"
+    assert payload["detections"][0]["anatomia_ok"] is False, "a anatomia REPROVA"
+    assert payload["guarda_pessoa"]["anatomia_ok"] is False
+
+
+def test_anatomia_barra_quando_ligada():
+    pessoa = _Caixa(x=100, y=100, w=200, h=800)
+    g = _guarda(
+        _ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.99),
+        anatomia="barrar",
+    )
+    payload = _payload_com_caixa((100, 500, 60, 40), frame_wh=(1280, 720))
+    payload["detections"][0]["class"] = "Uso incorreto de mascara"
+    assert g.julgar("cam-1", payload, _jpeg()) is False
+    r = g.resumo()
+    assert r["barrados_por_anatomia"] == 1
+    assert r["anatomia"]["lugar_errado"] == 1
+
+
+def test_anatomia_na_parte_certa_nao_barra():
+    pessoa = _Caixa(x=100, y=100, w=200, h=800)
+    g = _guarda(
+        _ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.99),
+        anatomia="barrar",
+    )
+    # 1080 * (110/720) = 165 px -> ~8% da altura da pessoa: cabeca.
+    payload = _payload_com_caixa((100, 110, 60, 40), frame_wh=(1280, 720))
+    payload["detections"][0]["class"] = "Uso incorreto de mascara"
+    assert g.julgar("cam-1", payload, _jpeg()) is True
+    assert payload["detections"][0]["anatomia_ok"] is True
+    assert g.resumo()["barrados_por_anatomia"] == 0
+
+
+def test_indeterminado_nunca_barra_mesmo_com_anatomia_ligada():
+    """Classe fora do mapa -> None. `None` publica; so `False` barra."""
+    pessoa = _Caixa(x=100, y=100, w=200, h=800)
+    g = _guarda(
+        _ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.99),
+        anatomia="barrar",
+    )
+    payload = _payload_com_caixa((100, 500, 60, 40), frame_wh=(1280, 720))
+    payload["detections"][0]["class"] = "classe_nova_do_modelo"
+    assert g.julgar("cam-1", payload, _jpeg()) is True
+    assert payload["detections"][0]["anatomia_ok"] is None
+    assert g.resumo()["anatomia"]["indeterminado"] == 1
+
+
+def test_uma_caixa_errada_entre_varias_reprova_o_evento():
+    """Basta UMA caixa no lugar errado para o evento ficar suspeito — o oposto
+    da contencao, onde basta UMA caixa boa para ele ser plausivel."""
+    pessoa = _Caixa(x=100, y=100, w=200, h=800)
+    g = _guarda(_ResultadoComCaixas(found=True, boxes=(pessoa,), max_confidence=0.99))
+    payload = _payload_com_caixa((100, 110, 60, 40), frame_wh=(1280, 720))
+    payload["detections"][0]["class"] = "Uso incorreto de mascara"
+    payload["detections"].append({
+        "class": "Sem protetor de ouvido", "confidence": 0.7,
+        "bbox": [100, 500, 60, 40],                  # na perna
+        "bbox_unidade": "pixels_xywh_streammux", "frame_wh": [1280, 720],
+    })
+    g.julgar("cam-1", payload, _jpeg())
+    assert payload["detections"][0]["anatomia_ok"] is True
+    assert payload["detections"][1]["anatomia_ok"] is False
+    assert payload["guarda_pessoa"]["anatomia_ok"] is False
+
+
+def test_modo_anatomia_invalido_cai_em_so_medir():
+    from app.guarda_pessoa import build_guarda_pessoa_from_env
+    g = _guarda(_ResultadoComCaixas(found=True), anatomia="barra_tudo_ai")
+    assert g.resumo()["modo_anatomia"] == "medir"
+    assert build_guarda_pessoa_from_env is not None      # import vivo
