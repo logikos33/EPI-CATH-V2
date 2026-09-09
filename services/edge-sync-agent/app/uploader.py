@@ -48,12 +48,23 @@ def _to_ingest_event(item: dict) -> dict:
     between retries (attempts) goes in — see module docstring on dedup.
     """
     occurred = datetime.fromtimestamp(item["created_at"], tz=timezone.utc)
-    return {
+    payload = item.get("payload") or {}
+    evento = {
         "event_type": item["event_type"],
         "camera_id": item["camera_id"],
-        "payload": item.get("payload") or {},
+        "payload": payload,
         "occurred_at": occurred.isoformat(),
     }
+    # `evidence_r2_key` é campo de PRIMEIRO NÍVEL do evento na rota de ingest
+    # (`evt.get("evidence_r2_key")` em edge_events/routes.py), mas o buffer só
+    # tem colunas para type/camera/payload — o DetectionRelay a grava dentro
+    # do payload e ela é promovida aqui. Sem esta promoção a chave chegava à
+    # nuvem enterrada no JSONB e `alerts.evidence_r2_key` nascia NULL: o
+    # alerta aparece na tela sem frame para o operador julgar.
+    evidencia = payload.get("evidence_r2_key") if isinstance(payload, dict) else None
+    if evidencia:
+        evento["evidence_r2_key"] = evidencia
+    return evento
 
 
 class Uploader:

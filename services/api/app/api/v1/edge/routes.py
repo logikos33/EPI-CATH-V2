@@ -1029,6 +1029,32 @@ def upload_edge_frame() -> tuple:
     return success({"frame_id": str(frame["id"]), "r2_key": r2_key}, status=201)
 
 
+def _ler_jpeg_da_camera(max_bytes: int) -> "tuple[bytes | None, tuple | None]":
+    """Multipart `file` → bytes de imagem validados, ou (None, resposta de erro).
+
+    Compartilhado pelas duas rotas que recebem UMA imagem da câmera vinda do
+    box (snapshot de triagem e evidência de alerta): as validações são as
+    mesmas e divergir uma delas em silêncio é como um limite de tamanho deixa
+    de valer.
+    """
+    rejection = _reject_if_content_length_exceeds(max_bytes)
+    if rejection is not None:
+        return None, rejection
+
+    file = request.files.get("file")
+    if file is None:
+        return None, error("Campo 'file' obrigatório (multipart)", 422)
+
+    data = _read_bounded(file, max_bytes)
+    if data is None:
+        return None, error(f"Arquivo excede o limite de {max_bytes // (1024 * 1024)}MB", 413)
+    if not data:
+        return None, error("Arquivo vazio", 422)
+    if _image_dimensions(data) is None:
+        return None, error("Arquivo não é uma imagem válida", 422)
+    return data, None
+
+
 @edge_bp.route("/cameras/<camera_id>/snapshot", methods=["POST"])
 @require_device_scope("snapshot:write")  # DeviceTokenScope.snapshot_write
 def upload_camera_snapshot(camera_id) -> tuple:
@@ -1054,24 +1080,9 @@ def upload_camera_snapshot(camera_id) -> tuple:
     if _get_camera_repo().get_by_id_and_tenant(camera_id, tenant_id) is None:
         return error("Câmera não encontrada", 404)
 
-    rejection = _reject_if_content_length_exceeds(_MAX_SNAPSHOT_BYTES)
+    data, rejection = _ler_jpeg_da_camera(_MAX_SNAPSHOT_BYTES)
     if rejection is not None:
         return rejection
-
-    file = request.files.get("file")
-    if file is None:
-        return error("Campo 'file' obrigatório (multipart)", 422)
-
-    data = _read_bounded(file, _MAX_SNAPSHOT_BYTES)
-    if data is None:
-        return error(
-            f"Arquivo excede o limite de {_MAX_SNAPSHOT_BYTES // (1024 * 1024)}MB", 413
-        )
-    if not data:
-        return error("Arquivo vazio", 422)
-
-    if _image_dimensions(data) is None:
-        return error("Arquivo não é uma imagem válida", 422)
 
     r2_key = f"{R2Prefix.SNAPSHOTS}/{tenant_id}/{camera_id}/{int(time.time() * 1000)}.jpg"
 
@@ -1106,6 +1117,72 @@ def upload_camera_snapshot(camera_id) -> tuple:
 
     logger.info(
         "camera_snapshot_uploaded: device=%s camera=%s r2_key=%s", device_id, camera_id, r2_key,
+    )
+    return success({"r2_key": r2_key}, status=201)
+
+
+@edge_bp.route("/cameras/<camera_id>/evidence", methods=["POST"])
+@require_device_scope("events:write")  # DeviceTokenScope.events_write
+def upload_camera_evidence(camera_id) -> tuple:
+    """Recebe o JPEG que vai virar a EVIDÊNCIA de um alerta do edge.
+
+    Por que existe: `alerta_de_evento_do_edge` não sobe imagem — ela espera a
+    chave R2 pronta no evento. O agente do box, porém, não tem (nem deve ter)
+    credencial de R2: todo upload edge→nuvem passa por device token RS256. Sem
+    esta rota o box não tinha COMO produzir a chave, e todo alerta nascia com
+    `evidence_r2_key` NULL — o operador abre a tela e não tem frame para julgar.
+
+    Chave: a MESMA convenção do caminho ao vivo (`inference._save_alert`,
+    `evidence/{camera_id}/{timestamp}.jpg`). Um segundo dialeto para o mesmo
+    tipo de objeto seria dívida sem ganho — quem lê assina a chave gravada.
+
+    Separada de `/cameras/<id>/snapshot` de propósito, apesar do corpo comum:
+    aquela é a MINIATURA DE TRIAGEM (prefixo `snapshots/`, retenção e
+    semântica próprias) e escreve o cache que a tela de câmeras lê. Reusá-la
+    faria a miniatura da câmera virar "o último alerta", que é outra coisa.
+    """
+    tenant_id, _site_id, device_id = g.device_ctx
+
+    if _get_camera_repo().get_by_id_and_tenant(camera_id, tenant_id) is None:
+        return error("Câmera não encontrada", 404)  # C-01: cross-tenant some, não dá 403
+
+    data, rejection = _ler_jpeg_da_camera(_MAX_SNAPSHOT_BYTES)
+    if rejection is not None:
+        return rejection
+
+    # Mesmo formato de `inference._save_alert` (que ainda usa o `utcnow()`
+    # deprecado) — string idêntica, sem o DeprecationWarning.
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    r2_key = f"{R2Prefix.EVIDENCE}/{camera_id}/{timestamp}.jpg"
+
+    try:
+        from app.infrastructure.storage.local_storage import get_storage  # noqa: PLC0415
+
+        # `get_storage()` SEM tenant, de propósito — diferente da rota de
+        # snapshot logo acima. Quem LÊ a evidência de alerta
+        # (alerts/routes.py, presigned de download) e quem a escreve no
+        # caminho ao vivo (inference._save_alert) usam os dois a factory sem
+        # tenant. Passar `tenant_id` aqui resolveria a credencial do
+        # integration store do tenant: num tenant com R2 próprio, o objeto
+        # iria para um bucket que o leitor não consulta — evidência gravada
+        # e invisível, que é pior que evidência ausente.
+        get_storage().upload_bytes(r2_key, data, "image/jpeg")
+    except StorageError as exc:
+        logger.error(
+            "edge_evidence_storage_error device=%s camera=%s r2_key=%s err=%s",
+            device_id, camera_id, r2_key, exc,
+        )
+        return error(f"Falha no storage ao gravar a evidência: {exc}", 502)
+    except Exception:
+        logger.exception(
+            "edge_evidence_storage_unexpected device=%s camera=%s r2_key=%s",
+            device_id, camera_id, r2_key,
+        )
+        return error("Falha inesperada no storage ao gravar a evidência", 502)
+
+    logger.info(
+        "edge_evidence_uploaded device=%s camera=%s r2_key=%s bytes=%d",
+        device_id, camera_id, r2_key, len(data),
     )
     return success({"r2_key": r2_key}, status=201)
 
