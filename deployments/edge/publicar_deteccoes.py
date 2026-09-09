@@ -159,6 +159,7 @@ class Publicador:
         cooldown_s: float,
         confianca_min: float,
         mux_wh: tuple[int, int],
+        piso_entre_s: float = 10.0,
     ) -> None:
         self._fontes = fontes
         self._taxonomia = taxonomia
@@ -173,6 +174,11 @@ class Publicador:
         # Cooldown específico da câmera (o front governa); cai no global quando
         # a câmera não tem valor próprio.
         self._cooldown_por_camera: dict[str, float] = {}
+        #: Instante da última publicação por câmera — o piso que nem o
+        #: crescimento fura. Distinto da janela: a janela decide "é cena nova?",
+        #: o piso decide "já não faz pouquíssimo tempo?".
+        self._ultima_publicacao: dict[str, float] = {}
+        self._piso_entre_s = piso_entre_s
         self.contagem: Counter = Counter()
 
     def cooldown_de(self, camera_id: str) -> float:
@@ -198,16 +204,44 @@ class Publicador:
         publica e crescer publica na hora, que é exatamente a assimetria
         pedida: mais gente é notícia, menos gente não é.
         """
-        contagem = Counter(str(d.get("class", "")) for d in deteccoes)
+        # ⚠️ SÓ CLASSE DE VIOLAÇÃO ENTRA NA ASSINATURA.
+        #
+        # Medido em produção na RVB (09/09): contando TODAS as detecções, uma
+        # pessoa a mais USANDO EPI corretamente furava o cooldown e republicava
+        # a violação antiga. Log real da câmera 841ceaef:
+        #
+        #   08:49:56  ['Sem protetor de ouvido', 'Protetor auditivo']       n=2
+        #   08:49:58  ['Sem protetor de ouvido', 'Protetor auditivo' x2]    n=3  ← publicou
+        #
+        # A violação não mudou — cresceu a CONFORMIDADE. E `Protetor auditivo`
+        # é 88% de tudo que o modelo emite, com contagem oscilando a cada
+        # quadro: sozinho, isso explicava a enxurrada que o dono viu.
+        #
+        # Conformidade não vira alerta (a nuvem a descarta na polaridade), logo
+        # não pode decidir se um alerta nasce.
+        contagem = Counter(
+            str(d.get("class", "")) for d in deteccoes
+            if self._violacao is None or str(d.get("class", "")).lower() in self._violacao
+        )
         abertura, maximo = self._janela.get(camera_id, (0.0, Counter()))
         if instante - abertura >= self.cooldown_de(camera_id):
             self._janela[camera_id] = (instante, contagem)   # janela nova
+            self._ultima_publicacao[camera_id] = instante
             return True
+        # ⚠️ PISO ENTRE PUBLICAÇÕES, mesmo quando cresce.
+        #
+        # "Entrou mais gente" é notícia — mas o detector oscila, e três
+        # crescimentos no MESMO segundo são o detector se estabilizando, não
+        # gente chegando. Sem piso, uma situação só virava três alertas
+        # (medido: 11:47:30 três vezes na mesma câmera e classe).
+        if instante - self._ultima_publicacao.get(camera_id, 0.0) < self._piso_entre_s:
+            return False
         if any(n > maximo.get(c, 0) for c, n in contagem.items()):
             # Monotônico: o máximo nunca encolhe dentro da janela.
             self._janela[camera_id] = (abertura, Counter(
                 {c: max(n, maximo.get(c, 0)) for c in set(maximo) | set(contagem)
                  for n in [contagem.get(c, 0)]}))
+            self._ultima_publicacao[camera_id] = instante
             return True
         return False
 
@@ -346,39 +380,65 @@ def autoteste() -> int:
     assert payload["detections"][0]["frame_wh"] == [1280, 720]
     assert payload["detections"][0]["bbox_unidade"] == _UNIDADE_BBOX
 
-    # ---- dedup de cena: o que o dono pediu, e o que quebraria um dedup ingênuo ----
+    # ---- dedup de cena: o que o dono pediu, e os dois defeitos medidos ----
     d = lambda *cs: [{"class": c} for c in cs]
-    pub2 = Publicador({"0": "cam"}, tax, {"sem protetor de ouvido"}, 30.0, 0.0, (1280, 720))
+    VIOL = {"sem protetor de ouvido", "sem luvas"}
+    SP, SL, PA = "Sem protetor de ouvido", "Sem Luvas", "Protetor auditivo"
+    novo_pub = lambda: Publicador({"0": "cam"}, tax, set(VIOL), 30.0, 0.0, (1280, 720), piso_entre_s=10.0)
 
-    # 1) Cena PARADA não republica. Pessoa 10 min no quadro = 1 evento, não 20.
-    assert pub2._deve_publicar("cam", d("a"), 1000.0) is True
+    # 1) Cena PARADA não republica. Pessoa 10 min no quadro = 1 evento.
+    p1 = novo_pub()
+    assert p1._deve_publicar("cam", d(SP), 1000.0) is True
     for t in range(1001, 1030):
-        assert pub2._deve_publicar("cam", d("a"), float(t)) is False, t
+        assert p1._deve_publicar("cam", d(SP), float(t)) is False, t
 
-    # 2) Cena que CRESCE republica na hora — "entrou mais gente".
-    assert pub2._deve_publicar("cam", d("a", "a"), 1005.0) is True
+    # 2) DEFEITO MEDIDO NA RVB: crescer a CONFORMIDADE não pode republicar.
+    #    Log real da câmera 841ceaef: a violação não mudou, cresceu
+    #    `Protetor auditivo` — e o cooldown foi furado. Conformidade não vira
+    #    alerta, logo não decide se um alerta nasce.
+    p2 = novo_pub()
+    assert p2._deve_publicar("cam", d(SP, PA), 2000.0) is True
+    assert p2._deve_publicar("cam", d(SP, PA, PA), 2015.0) is False, "conformidade não é notícia"
+    assert p2._deve_publicar("cam", d(SP, PA, PA, PA), 2025.0) is False
 
-    # 3) ENCOLHER nunca republica: some uma pessoa, não é notícia.
-    assert pub2._deve_publicar("cam", d("a"), 1006.0) is False
+    # 3) Violação que CRESCE ainda é notícia — "entrou mais gente".
+    p3 = novo_pub()
+    assert p3._deve_publicar("cam", d(SP), 3000.0) is True
+    assert p3._deve_publicar("cam", d(SP, SP), 3015.0) is True
 
-    # 4) O caso que mata dedup por "assinatura mudou": com recall 0,57 a
-    #    sequência {SL} → {SL,SO} → {SL} acontece por FALHA DE DETECÇÃO. O
-    #    primeiro crescimento é notícia; a volta ao estado menor, não. Um dedup
-    #    que compara com a última assinatura publicaria nas duas.
-    pub3 = Publicador({"0": "cam"}, tax, None, 30.0, 0.0, (1280, 720))
-    assert pub3._deve_publicar("c", d("SL"), 2000.0) is True
-    assert pub3._deve_publicar("c", d("SL", "SO"), 2001.0) is True   # cresceu: notícia
-    assert pub3._deve_publicar("c", d("SL"), 2002.0) is False        # oscilou: não
-    assert pub3._deve_publicar("c", d("SL", "SO"), 2003.0) is False  # já foi contada
+    # 4) DEFEITO MEDIDO: três crescimentos no MESMO segundo eram três alertas.
+    #    Isso é o detector se estabilizando, não gente chegando. O piso segura.
+    p4 = novo_pub()
+    assert p4._deve_publicar("cam", d(SP), 4000.0) is True
+    assert p4._deve_publicar("cam", d(SP, SP), 4000.5) is False, "piso segura a oscilação"
+    assert p4._deve_publicar("cam", d(SP, SP, SP), 4001.0) is False
+    # passado o piso, crescimento real volta a valer
+    assert p4._deve_publicar("cam", d(SP, SP, SP), 4011.0) is True
 
-    # 5) Passado o cooldown, janela nova: volta a publicar mesmo igual.
-    assert pub3._deve_publicar("c", d("SL"), 2000.0 + 31) is True
+    # 5) ENCOLHER nunca republica.
+    p5 = novo_pub()
+    assert p5._deve_publicar("cam", d(SP, SP), 5000.0) is True
+    assert p5._deve_publicar("cam", d(SP), 5015.0) is False
 
-    # 6) Cooldown por câmera — é como o front governa quantos alertas cada
-    #    câmera gera. Sem valor próprio, cai no global.
-    pub3._cooldown_por_camera["c"] = 5.0
-    assert pub3.cooldown_de("c") == 5.0
-    assert pub3.cooldown_de("outra") == 30.0
+    # 6) A oscilação por FALHA de detecção (recall 0,57) não vira evento:
+    #    {SL} → {SL,SP} → {SL} → {SL,SP} tem UM crescimento, não três.
+    p6 = novo_pub()
+    assert p6._deve_publicar("cam", d(SL), 6000.0) is True
+    assert p6._deve_publicar("cam", d(SL, SP), 6015.0) is True    # cresceu: notícia
+    assert p6._deve_publicar("cam", d(SL), 6026.0) is False       # oscilou
+    assert p6._deve_publicar("cam", d(SL, SP), 6029.0) is False   # já foi contada
+    # (aos 6031 a janela de 30s expira e abrir uma nova É o certo — não é bug)
+
+    # 7) Passado o cooldown, janela nova: volta a publicar mesmo igual.
+    p7 = novo_pub()
+    assert p7._deve_publicar("cam", d(SP), 7000.0) is True
+    assert p7._deve_publicar("cam", d(SP), 7031.0) is True
+
+    # 8) Cooldown por câmera — é como o front governa a cadência.
+    p8 = novo_pub()
+    p8._cooldown_por_camera["cam"] = 5.0
+    assert p8.cooldown_de("cam") == 5.0
+    assert p8.cooldown_de("outra") == 30.0
 
     print("autoteste OK")
     return 0
