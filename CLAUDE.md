@@ -211,6 +211,38 @@ return error("Câmera não encontrada", 404)  # {"success":false,"error":"..."}
 
 ---
 
+## Design — fonte de verdade visual
+
+🔴 **`docs/design/handoff-f5/` + [`DESIGN-INDEX.md`](./docs/design/handoff-f5/DESIGN-INDEX.md) mandam
+no visual.** O índice responde, sem perguntar a ninguém, **qual prancha rege qual tela** e **o que
+ainda não tem desenho**.
+
+**Antes de criar ou alterar qualquer tela:**
+
+1. Abrir o `DESIGN-INDEX.md` e achar a prancha que rege a rota
+2. Abrir a prancha (`.dc.html` — protótipo navegável, abre no navegador) e implementar **contra ela**
+3. Declarar a prancha no PR (campo obrigatório do template)
+
+**Tela SEM prancha → ⛔ NÃO desenhe em código.** Duas saídas, ⛔ nenhuma terceira:
+
+- **produzir a prancha primeiro** — sessão de Claude Design de dentro do Code, `.dc.html` salvo
+  direto no bundle e índice atualizado **no mesmo commit**; ou
+- **registrar pendência de design** — linha `SEM-DESENHO` no índice + issue, e a tela espera
+
+⚠️ *"Desenho em código e a prancha vem depois"* é como nasce a divergência que ninguém mais reconcilia.
+Foi o que produziu as 22 perdas de paridade do front novo.
+
+**Identidade:** sempre `--lk-*`. ⛔ **Zero hex solto em componente** — o white-label passa por
+`ThemeProvider → /v1/tenant/branding → CSS vars`, e hex literal fura essa ponte em silêncio.
+
+**Design novo nasce NO REPO.** Prancha que vive só como URL de artifact ⛔ não existe para quem vier
+depois: exportar para `docs/design/handoff-f5/` **antes** de fechar a sessão.
+
+**Cético de fidelidade (review de PR de tela):** compara *screenshot da implementação × prancha* —
+estrutura, hierarquia, estados (vazio/carregando/erro), linguagem. Divergência não justificada
+**reprova**. ⚠️ `IMPLEMENTADA` no índice significa *"existe prancha, existe rota, foi construída
+contra ela"* — ⛔ **não** é atestado de fidelidade; quem atesta é o cético, PR a PR.
+
 ## Migrations — forward-only
 
 1. Última: `ls infra/migrations/*.sql | sort | tail -1` (atualmente **117**)

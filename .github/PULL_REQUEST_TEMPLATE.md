@@ -11,6 +11,15 @@ Closes #
 - [ ] auth / tenant — [ ] permissão / role — [ ] migration — [ ] SQL
 - [ ] evento / alerta — [ ] treino / modelo — [ ] caminho servido (inferência)
 
+## Prancha de referência
+<!-- Tela? Nome do .dc.html de docs/design/handoff-f5/. Não é tela? "n/a + motivo".
+     PR de tela sem prancha declarada é REPROVÁVEL em review (CLAUDE.md § Design). -->
+`Prancha:` <arquivo.dc.html | n/a — motivo>
+
+- [ ] abri a prancha e implementei contra ela
+- [ ] `DESIGN-INDEX.md` atualizado no MESMO commit (estado da linha desta tela)
+- [ ] zero hex solto — identidade só por `--lk-*`
+
 ## Prova
 - [ ] Mutação rodada (tirei a correção → ficou vermelho; recoloquei → verde) — **S / N**
 - Comando e saída:
