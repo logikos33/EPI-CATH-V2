@@ -1,0 +1,246 @@
+[application]
+enable-perf-measurement=1
+perf-measurement-interval-sec=5
+gie-kitti-output-dir=/dev/shm/recognition-kitti-epi
+kitti-track-output-dir=/dev/shm/recognition-kitti-track
+
+[tiled-display]
+enable=0
+
+# eb1501db-82ad-485a-a441-5c665b4e5a28
+[source0]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=1&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 17bbada9-5153-48a6-9c7d-34f64a8a33fa
+[source1]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=2&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 42bf8a0b-2b9c-4076-90c0-6eb014c2ad6e
+[source2]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=3&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 7abbe027-85e3-474e-a273-8c06e485cf2d
+[source3]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=4&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 7de1cfb3-d730-46d6-87a8-311a97d42db2
+[source4]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=5&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 4e261bef-f874-4bb1-b314-1451731089e7
+# DESATIVADA 2026-09-09: canal 6 nao responde (48x "Could not read from resource",
+# ZERO 401 -> nao e credencial, o canal esta fora). Ficava em retentativa a cada
+# 10s contra o gravador 192.168.35.18. NAO removida do banco.
+# ATENCAO: deepstream-app COMPACTA os source-ids das fontes habilitadas (medido:
+# KITTI passou a emitir 000..016, nao 000..017 pulando 005). Ao desabilitar uma
+# fonte aqui, fontes_epi.json TEM de ser renumerado junto ou as deteccoes saem
+# atribuidas a camera errada.
+[source5]
+enable=0
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=6&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 80bad150-7315-4706-b606-e5d356467ae4
+
+[source6]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=7&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 2a683620-34e0-4cf7-a8ae-5893aa11381a
+[source7]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=8&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# c130d032-4a3a-4d09-ac77-c3121a03a6a7
+[source8]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=10&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 969102c5-4ebc-4ba0-9f86-48e314493f55
+[source9]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=11&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 56827b0f-ad4f-4909-8883-00474258b633
+[source10]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=12&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 27e0245c-9a14-45fe-8662-d478b5f793d1
+[source11]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=21&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 238092f0-885a-40ce-85d0-a8b6198d844a
+[source12]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=23&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 50042b36-eacc-48f8-a9a9-efdfb785bbcb
+[source13]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=24&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 4dc28bc0-10ef-46cb-bf9c-5b148154313c
+[source14]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=26&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# 841ceaef-b893-4ab5-8718-0f0c37f6acd1
+[source15]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=27&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# b3f1e0d1-e011-4cc0-9a88-e380f6c6d2f7
+[source16]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=28&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+# dc099fbd-e27a-4f48-b4ff-d8d7a0e79f44
+[source17]
+enable=1
+type=4
+uri=rtsp://<REDIGIDO>@192.168.35.18:554/cam/realmonitor?channel=29&subtype=0
+gpu-id=0
+select-rtp-protocol=4
+latency=100
+rtsp-reconnect-interval-sec=10
+drop-frame-interval=10
+
+[sink0]
+enable=1
+type=1
+sync=0
+qos=0
+
+[osd]
+enable=0
+
+[streammux]
+gpu-id=0
+batch-size=18
+batched-push-timeout=33000
+width=1280
+height=720
+live-source=1
+
+[tracker]
+enable=1
+tracker-width=640
+tracker-height=384
+gpu-id=0
+ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+ll-config-file=/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml
+display-tracking-id=1
+
+[primary-gie]
+enable=1
+gpu-id=0
+interval=1
+config-file=/home/pandora/recognition/models/config_infer_46a30ed9.txt

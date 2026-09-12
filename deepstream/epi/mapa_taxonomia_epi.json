@@ -1,0 +1,87 @@
+{
+  "modelo_id": "8b3bd146-1e05-45d9-a7c8-520a4f629862",
+  "modelo_display": "Logikos EPI Parcial (10 classes) - 25/08 03h45",
+  "dataset_version": "v16-volume (11 categorias COCO, ids 0..10)",
+  "_procedencia": "O arquivo servido chama-se model_46a30ed9*.onnx/.engine por ENGANO de nome: sha256 448469e8befca7056c165d7e9f1d430b8144bf607332e9d6e488fe175c8cb405 = modelo 8b3bd146 (labels [1,300,11]). O modelo 46a30ed9 e OUTRO (sha 7f889348..., labels [1,300,13], dataset v10b-freeze). Renomear os arquivos depende do dono.",
+  "_nota": "Labelfile usa token ASCII sem espaco porque parse_kitti do publicador e POSICIONAL (linha.split(), campos[15]=confianca): um nome com espaco desloca todos os campos e corrompe bbox+confianca em silencio. A traducao para o nome exato do catalogo acontece AQUI.",
+  "_prova": "slot do modelo == category_id do COCO v16-volume. Matriz GT x slot em 300 imagens de val (408 anotacoes humanas, 316 casadas IoU>=0.5): 88,3% na diagonal, 0,3% no deslocamento -1. Pareamento nuvem-vs-box na MESMA imagem (3 imagens, 7 pares) confirma que o NvDsInferParseCustomRFDETR repassa o indice do slot como class_id.",
+  "classes": [
+    {
+      "indice": 0,
+      "modelo": "recognition",
+      "papel": "interna",
+      "catalogo": null
+    },
+    {
+      "indice": 1,
+      "modelo": "Luvas",
+      "papel": "evento",
+      "catalogo": "Luvas",
+      "polaridade_hoje": false
+    },
+    {
+      "indice": 2,
+      "modelo": "Sem_Luvas",
+      "papel": "evento",
+      "catalogo": "Sem Luvas",
+      "polaridade_hoje": true
+    },
+    {
+      "indice": 3,
+      "modelo": "Oculos",
+      "papel": "evento",
+      "catalogo": "Óculos",
+      "polaridade_hoje": false
+    },
+    {
+      "indice": 4,
+      "modelo": "Sem_Oculos",
+      "papel": "evento",
+      "catalogo": "Sem Óculos",
+      "polaridade_hoje": true
+    },
+    {
+      "indice": 5,
+      "modelo": "Protetor_auditivo",
+      "papel": "evento",
+      "catalogo": "Protetor auditivo",
+      "polaridade_hoje": false
+    },
+    {
+      "indice": 6,
+      "modelo": "mascara",
+      "papel": "evento",
+      "catalogo": "mascara",
+      "polaridade_hoje": false
+    },
+    {
+      "indice": 7,
+      "modelo": "Sem_protetor_de_ouvido",
+      "papel": "evento",
+      "catalogo": "Sem protetor de ouvido",
+      "polaridade_hoje": true
+    },
+    {
+      "indice": 8,
+      "modelo": "Sem_mascara",
+      "papel": "evento",
+      "catalogo": "Sem mascara",
+      "polaridade_hoje": true
+    },
+    {
+      "indice": 9,
+      "modelo": "Botas",
+      "papel": "evento",
+      "catalogo": "Botas",
+      "polaridade_hoje": false
+    },
+    {
+      "indice": 10,
+      "modelo": "Uso_incorreto_de_mascara",
+      "papel": "evento",
+      "catalogo": "Uso incorreto de mascara",
+      "polaridade_hoje": true
+    }
+  ],
+  "_polaridade": "decisao do dono 2026-09-09: ausencia de EPI (sem protetor de ouvido, sem mascara, sem luvas, sem oculos) e uso incorreto de mascara sao VIOLACAO. Espelha public.yolo_classes.is_violation e public.module_classes.is_violation no DEV."
+}
