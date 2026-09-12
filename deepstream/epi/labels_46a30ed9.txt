@@ -1,0 +1,13 @@
+recognition
+Capacete
+Luvas
+Sem_Luvas
+Oculos
+Sem_Oculos
+Protetor_auditivo
+mascara
+Sem_protetor_de_ouvido
+Sem_mascara
+Botas
+Uso_incorreto_de_mascara
+Sem_botas

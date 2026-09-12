@@ -1,0 +1,43 @@
+# nvinfer do modelo servido 46a30ed9 (RF-DETR, Apache 2.0) — RVB / modulo EPI.
+#
+# PRE-PROCESSAMENTO (divergencia D-66, resolvida por MEDIDA em 2026-09-09):
+#   RGB + ImageNet mean/std. Medido no proprio ONNX, na CPU, sobre 2 frames
+#   reais (sample_4mp.ts):
+#     RGB/255 + ImageNet mean/std  -> score max 0.7505 / 0.6020
+#     estes net-scale-factor+offsets -> score max 0.7505 / 0.6038  (equivalente)
+#     BGR 0-255 cru                -> score max 0.0572 / 0.0665  (ZERO deteccao)
+#   net-scale-factor = 1/(255*0.226) onde 0.226 = media de [0.229,0.224,0.225].
+#   Mesmos numeros de mm/preproc_rfdetr_roi.txt (campanha de escala).
+#
+# NAO usa input-tensor-from-meta=1 (que esta no molde config_infer_rfdetr_roi.txt):
+#   aquele e o caminho com nvdspreprocess/ROI, que so infere dentro de recortes.
+#   Aqui e FRAME CHEIO, entao quem escala e normaliza e o proprio nvinfer.
+#
+# maintain-aspect-ratio=0 de proposito: o detector de referencia
+# (onnx_rfdetr._preprocess_rfdetr) faz resize ESTICADO, sem letterbox, e foi com
+# ele que o recall do duelo foi medido. Ligar letterbox aqui mudaria o preproc
+# em relacao ao numero medido.
+#
+# num-detected-classes=11 = o que o tensor `labels` REALMENTE tem ([1,300,11]),
+# nao os 13 nomes do dicionario COCO do dataset. Ver labels_46a30ed9.txt.
+[property]
+gpu-id=0
+net-scale-factor=0.0173520736
+offsets=123.675;116.28;103.53
+model-color-format=0
+model-engine-file=/home/pandora/recognition/models/model_46a30ed9_fp16_b1.engine
+labelfile-path=/home/pandora/recognition/models/labels_46a30ed9.txt
+batch-size=1
+network-mode=2
+num-detected-classes=13
+interval=0
+gie-unique-id=1
+network-type=0
+cluster-mode=4
+maintain-aspect-ratio=0
+parse-bbox-func-name=NvDsInferParseCustomRFDETR
+custom-lib-path=/home/pandora/jetson-experiments/rfdetr-parser/libnvdsparsebbox_rfdetr.so
+
+# 0,25: limiar pedido pelo dono nesta primeira subida.
+[class-attrs-all]
+pre-cluster-threshold=0.25
